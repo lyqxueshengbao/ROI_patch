@@ -163,8 +163,11 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
     method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
     method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
 
+    total_conds = len(args.snr_list) * len(args.L_list)
+    cond_idx = 0
     for snr_db in args.snr_list:
         for L in args.L_list:
+            cond_idx += 1
             cond_seed = seed + int(float(snr_db) * 100) + int(L) * 10000
             ds_train_full = make_fixed_condition_dataset(
                 split="train",
@@ -198,6 +201,12 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
             Xtr, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
             Xte, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+
+            if args.verbose:
+                print(
+                    f"  [cond {cond_idx:02d}/{total_conds}] SNR={float(snr_db):g}dB L={int(L)} "
+                    f"train_n={len(ds_train)} test_n={len(ds_test)} feat_dim={Xtr.shape[1]}"
+                )
 
             for method in args.methods:
                 clf = _build_method(method, seed=seed)
@@ -262,6 +271,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
             )
 
         aggregates.append(RepeatAggregate(method=method, accuracy=float(m_all.accuracy), macro_f1=float(m_all.macro_f1)))
+        print(f"  [all-conditions] {method:10s} acc={float(m_all.accuracy):.4f} macro_f1={float(m_all.macro_f1):.4f}")
 
     _write_csv(
         os.path.join(repeat_dir, "traditional_metrics_by_condition.csv"),
@@ -340,6 +350,7 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only save all-conditions confusion matrices (skip per-(SNR,L) PNGs).",
     )
+    p.add_argument("--verbose", action="store_true", help="Print per-condition progress.")
     return p
 
 
@@ -350,10 +361,11 @@ def main() -> None:
     all_repeats: list[list[RepeatAggregate]] = []
     for i in range(int(args.repeat)):
         seed = int(args.seed) + i * 1000
-        print(f"[repeat {i:02d}] seed={seed}")
+        print(f"[repeat {i:02d}] seed={seed} out_dir={args.out_dir}")
         all_repeats.append(_eval_one_repeat(args, repeat_idx=i, seed=seed))
 
     _summarize_mean_std(args.out_dir, all_repeats)
+    print(f"Saved summary: {os.path.join(args.out_dir, 'summary_mean_std.csv')}")
 
 
 if __name__ == "__main__":
