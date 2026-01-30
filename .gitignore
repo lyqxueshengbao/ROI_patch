@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+.idea/
+
+# Training/eval outputs (default examples use runs*/ and runs/)
+runs/
+runs*/
+
