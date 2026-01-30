@@ -57,6 +57,88 @@ def _to_numpy_xy(dataset, batch_size: int, num_workers: int) -> tuple[np.ndarray
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
 
 
+def _spectral_entropy_2d(img: np.ndarray) -> float:
+    p = np.abs(np.fft.fft2(img)) ** 2
+    p = p.astype(np.float64)
+    s = float(p.sum() + 1e-12)
+    p = p / s
+    return float(-(p * np.log(p + 1e-12)).sum())
+
+
+def _hand_features_from_sample(x_chw: np.ndarray) -> np.ndarray:
+    # x_chw: [2,H,W] (X0, Xhf)
+    x0 = x_chw[0]
+    xhf = x_chw[1]
+    h, w = x0.shape
+    k = 3
+    flat = x0.reshape(-1)
+    if flat.size >= k:
+        idx = np.argpartition(flat, -k)[-k:]
+        idx = idx[np.argsort(flat[idx])[::-1]]
+    else:
+        idx = np.arange(flat.size)
+        idx = idx[np.argsort(flat[idx])[::-1]]
+        idx = np.pad(idx, (0, k - idx.size), mode="edge")
+    ys = (idx // w).astype(np.float32)
+    xs = (idx % w).astype(np.float32)
+    vals = flat[idx].astype(np.float32)
+
+    cy = (h - 1) * 0.5
+    cx = (w - 1) * 0.5
+    ny = (ys - cy) / (cy + 1e-6)
+    nx = (xs - cx) / (cx + 1e-6)
+
+    coords = np.stack([ys, xs], axis=1).astype(np.float32)
+    d = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2) + 1e-12).astype(np.float32)
+    d12, d13, d23 = float(d[0, 1]), float(d[0, 2]), float(d[1, 2])
+    diag = float(np.sqrt((h - 1) ** 2 + (w - 1) ** 2) + 1e-6)
+    d_norm = np.array([d12, d13, d23], dtype=np.float32) / diag
+
+    # energy concentration (using shifted nonnegative energy proxy)
+    z = x0 - float(x0.min())
+    e = (z.astype(np.float64) ** 2).reshape(-1)
+    total_e = float(e.sum() + 1e-12)
+    topn = max(1, int(round(0.10 * e.size)))
+    idxe = np.argpartition(e, -topn)[-topn:]
+    conc = float(e[idxe].sum() / total_e)
+
+    ent = _spectral_entropy_2d(x0)
+    stats = np.array(
+        [
+            float(x0.mean()),
+            float(x0.std()),
+            float(xhf.mean()),
+            float(xhf.std()),
+        ],
+        dtype=np.float32,
+    )
+
+    feat = np.concatenate(
+        [
+            vals,  # 3
+            np.stack([ny, nx], axis=1).reshape(-1).astype(np.float32),  # 6
+            d_norm.astype(np.float32),  # 3
+            np.array([conc, ent], dtype=np.float32),  # 2
+            stats,  # 4
+        ],
+        axis=0,
+    ).astype(np.float32)
+    return feat
+
+
+def _to_numpy_handfeat_xy(dataset, batch_size: int, num_workers: int) -> tuple[np.ndarray, np.ndarray]:
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    for xb, yb in loader:
+        # xb: [B,2,H,W]
+        xb_np = xb.numpy().astype(np.float32, copy=False)
+        feats = np.stack([_hand_features_from_sample(xb_np[i]) for i in range(xb_np.shape[0])], axis=0)
+        xs.append(feats)
+        ys.append(yb.numpy().astype(np.int64, copy=False))
+    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+
+
 class ProtoClassifier(BaseEstimator, ClassifierMixin):
     def __init__(self, metric: str = "cosine") -> None:
         if metric not in ("cosine", "euclidean"):
@@ -97,7 +179,7 @@ def _build_method(method: str, seed: int) -> Any:
     if method == "svm_rbf":
         return Pipeline([("scaler", StandardScaler()), ("clf", SVC(kernel="rbf"))])
     if method == "svm_linear":
-        return Pipeline([("scaler", StandardScaler()), ("clf", LinearSVC(dual="auto", max_iter=5000))])
+        return Pipeline([("scaler", StandardScaler()), ("clf", LinearSVC(dual=True, max_iter=5000))])
     if method == "knn":
         return Pipeline([("scaler", StandardScaler()), ("clf", KNeighborsClassifier(n_neighbors=5, n_jobs=-1))])
     if method == "rf":
@@ -106,6 +188,12 @@ def _build_method(method: str, seed: int) -> Any:
         return Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=2000))])
     if method == "proto":
         return Pipeline([("scaler", StandardScaler()), ("clf", ProtoClassifier(metric="cosine"))])
+    if method == "handfeat_svm":
+        return Pipeline([("scaler", StandardScaler()), ("clf", SVC(kernel="rbf"))])
+    if method == "handfeat_svm_linear":
+        return Pipeline([("scaler", StandardScaler()), ("clf", SVC(kernel="linear"))])
+    if method == "handfeat_svm_rbf":
+        return Pipeline([("scaler", StandardScaler()), ("clf", SVC(kernel="rbf"))])
     raise ValueError(f"Unknown method: {method}")
 
 
@@ -162,6 +250,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
     by_condition_rows: list[dict[str, Any]] = []
     method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
     method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
+    need_hand = any(str(m).startswith("handfeat") for m in args.methods)
 
     total_conds = len(args.snr_list) * len(args.L_list)
     cond_idx = 0
@@ -181,6 +270,16 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                roi_mode=args.roi_mode,
+                center_sigma_oracle=args.center_sigma_oracle,
+                center_sigma_min=args.center_sigma_min,
+                center_sigma_max=args.center_sigma_max,
+                pseudo_peak_prob=args.pseudo_peak_prob,
+                pseudo_peak_max=args.pseudo_peak_max,
+                warp_prob=args.warp_prob,
+                warp_strength=args.warp_strength,
+                corr_noise_prob=args.corr_noise_prob,
+                corr_strength=args.corr_strength,
             )
             ds_test_full = make_fixed_condition_dataset(
                 split="test",
@@ -194,21 +293,40 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                roi_mode=args.roi_mode,
+                center_sigma_oracle=args.center_sigma_oracle,
+                center_sigma_min=args.center_sigma_min,
+                center_sigma_max=args.center_sigma_max,
+                pseudo_peak_prob=args.pseudo_peak_prob,
+                pseudo_peak_max=args.pseudo_peak_max,
+                warp_prob=args.warp_prob,
+                warp_strength=args.warp_strength,
+                corr_noise_prob=args.corr_noise_prob,
+                corr_strength=args.corr_strength,
             )
 
             ds_train = _choose_subset(ds_train_full, k=args.cond_train_samples, seed=cond_seed + 7)
             ds_test = _choose_test_subset(ds_test_full, cond_test_samples=args.cond_test_samples, seed=cond_seed + 13)
 
-            Xtr, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
-            Xte, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+            Xtr_flat, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
+            Xte_flat, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+            if need_hand:
+                Xtr_hand, _ = _to_numpy_handfeat_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
+                Xte_hand, _ = _to_numpy_handfeat_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
 
             if args.verbose:
                 print(
                     f"  [cond {cond_idx:02d}/{total_conds}] SNR={float(snr_db):g}dB L={int(L)} "
-                    f"train_n={len(ds_train)} test_n={len(ds_test)} feat_dim={Xtr.shape[1]}"
+                    f"train_n={len(ds_train)} test_n={len(ds_test)} feat_dim={Xtr_flat.shape[1]}"
                 )
 
             for method in args.methods:
+                if str(method).startswith("handfeat"):
+                    Xtr = Xtr_hand
+                    Xte = Xte_hand
+                else:
+                    Xtr = Xtr_flat
+                    Xte = Xte_flat
                 clf = _build_method(method, seed=seed)
                 clf.fit(Xtr, ytr)
                 y_pred = clf.predict(Xte).astype(np.int64, copy=False)
@@ -321,6 +439,16 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--L_list", type=int, nargs="+", default=[1])
     p.add_argument("--hf_mode", type=str, default="sobel", choices=["laplacian", "sobel"])
     p.add_argument("--normalize", type=str, default="per_sample", choices=["none", "per_sample"])
+    p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
+    p.add_argument("--center_sigma_oracle", type=float, default=1.0)
+    p.add_argument("--center_sigma_min", type=float, default=1.5)
+    p.add_argument("--center_sigma_max", type=float, default=6.0)
+    p.add_argument("--pseudo_peak_prob", type=float, default=0.35)
+    p.add_argument("--pseudo_peak_max", type=int, default=2)
+    p.add_argument("--warp_prob", type=float, default=0.25)
+    p.add_argument("--warp_strength", type=float, default=0.6)
+    p.add_argument("--corr_noise_prob", type=float, default=0.25)
+    p.add_argument("--corr_strength", type=float, default=0.6)
     p.add_argument("--patch_size", type=int, default=41)
     p.add_argument("--total_samples", type=int, default=24000)
     p.add_argument("--split", type=float, nargs=3, default=[0.7, 0.15, 0.15])
@@ -338,7 +466,17 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         default=["svm_rbf", "svm_linear", "knn", "rf", "logreg", "proto"],
-        choices=["svm_rbf", "svm_linear", "knn", "rf", "logreg", "proto"],
+        choices=[
+            "svm_rbf",
+            "svm_linear",
+            "knn",
+            "rf",
+            "logreg",
+            "proto",
+            "handfeat_svm",
+            "handfeat_svm_linear",
+            "handfeat_svm_rbf",
+        ],
     )
 
     p.add_argument("--batch_size", type=int, default=512)

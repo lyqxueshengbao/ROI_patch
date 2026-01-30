@@ -37,6 +37,16 @@ class ToyROIPatchDataset(Dataset):
         L_list: Iterable[int] = (1,),
         hf_mode: Literal["laplacian", "sobel"] = "laplacian",
         normalize: Literal["none", "per_sample"] = "per_sample",
+        roi_mode: Literal["oracle", "pipeline"] = "oracle",
+        center_sigma_oracle: float = 1.0,
+        center_sigma_min: float = 1.5,
+        center_sigma_max: float = 6.0,
+        pseudo_peak_prob: float = 0.35,
+        pseudo_peak_max: int = 2,
+        warp_prob: float = 0.25,
+        warp_strength: float = 0.6,
+        corr_noise_prob: float = 0.25,
+        corr_strength: float = 0.6,
         enable_aug: bool = True,
         num_classes: int = 4,
         height: int = 41,
@@ -51,6 +61,16 @@ class ToyROIPatchDataset(Dataset):
         self.L_list = [int(x) for x in L_list]
         self.hf_mode = hf_mode
         self.normalize = normalize
+        self.roi_mode = roi_mode
+        self.center_sigma_oracle = float(center_sigma_oracle)
+        self.center_sigma_min = float(center_sigma_min)
+        self.center_sigma_max = float(center_sigma_max)
+        self.pseudo_peak_prob = float(pseudo_peak_prob)
+        self.pseudo_peak_max = int(pseudo_peak_max)
+        self.warp_prob = float(warp_prob)
+        self.warp_strength = float(warp_strength)
+        self.corr_noise_prob = float(corr_noise_prob)
+        self.corr_strength = float(corr_strength)
         self.enable_aug = bool(enable_aug)
         self.num_classes = int(num_classes)
         self.height = int(height)
@@ -100,6 +120,16 @@ class ToyROIPatchDataset(Dataset):
             L=L,
             hf_mode=self.hf_mode,
             normalize=self.normalize,
+            roi_mode=self.roi_mode,
+            center_sigma_oracle=self.center_sigma_oracle,
+            center_sigma_min=self.center_sigma_min,
+            center_sigma_max=self.center_sigma_max,
+            pseudo_peak_prob=self.pseudo_peak_prob,
+            pseudo_peak_max=self.pseudo_peak_max,
+            warp_prob=self.warp_prob,
+            warp_strength=self.warp_strength,
+            corr_noise_prob=self.corr_noise_prob,
+            corr_strength=self.corr_strength,
             enable_aug=self.enable_aug and (self.split == "train"),
         )
         x_np, y = generate_sample(label, cfg, rng)
@@ -119,6 +149,17 @@ def make_fixed_condition_dataset(
     enable_aug: bool,
     height: int,
     width: int,
+    *,
+    roi_mode: Literal["oracle", "pipeline"] = "oracle",
+    center_sigma_oracle: float = 1.0,
+    center_sigma_min: float = 1.5,
+    center_sigma_max: float = 6.0,
+    pseudo_peak_prob: float = 0.35,
+    pseudo_peak_max: int = 2,
+    warp_prob: float = 0.25,
+    warp_strength: float = 0.6,
+    corr_noise_prob: float = 0.25,
+    corr_strength: float = 0.6,
 ) -> ToyROIPatchDataset:
     return ToyROIPatchDataset(
         split=split,
@@ -129,8 +170,17 @@ def make_fixed_condition_dataset(
         L_list=(int(L),),
         hf_mode=hf_mode,
         normalize=normalize,
+        roi_mode=roi_mode,
+        center_sigma_oracle=center_sigma_oracle,
+        center_sigma_min=center_sigma_min,
+        center_sigma_max=center_sigma_max,
+        pseudo_peak_prob=pseudo_peak_prob,
+        pseudo_peak_max=pseudo_peak_max,
+        warp_prob=warp_prob,
+        warp_strength=warp_strength,
+        corr_noise_prob=corr_noise_prob,
+        corr_strength=corr_strength,
         enable_aug=enable_aug,
         height=height,
         width=width,
     )
-

@@ -16,6 +16,25 @@ class ToyGenConfig:
     hf_mode: Literal["laplacian", "sobel"] = "laplacian"
     normalize: Literal["none", "per_sample"] = "per_sample"
     enable_aug: bool = True
+
+    # ROI center offset model
+    roi_mode: Literal["oracle", "pipeline"] = "oracle"
+    center_sigma_oracle: float = 1.0
+    center_sigma_min: float = 1.5
+    center_sigma_max: float = 6.0
+    center_trunc: float = 8.0  # truncate offsets to +/- this many pixels
+    center_snr_low: float = -15.0
+    center_snr_high: float = 20.0
+    center_L_min: int = 1
+    center_L_max: int = 16
+
+    # Stronger intra-class perturbations
+    pseudo_peak_prob: float = 0.35
+    pseudo_peak_max: int = 2
+    warp_prob: float = 0.25
+    warp_strength: float = 0.6
+    corr_noise_prob: float = 0.25
+    corr_strength: float = 0.6
     d_close: float = 6.0
     d_far: float = 14.0
     line_max_dist_to_line: float = 1.3
@@ -60,9 +79,53 @@ def _dist_point_to_line(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
     return area / denom
 
 
-def _sample_point(rng: np.random.Generator, height: int, width: int, margin: int) -> np.ndarray:
-    y = rng.uniform(margin, height - 1 - margin)
-    x = rng.uniform(margin, width - 1 - margin)
+def _clip01(x: float) -> float:
+    return float(np.clip(x, 0.0, 1.0))
+
+
+def _center_sigma(cfg: ToyGenConfig) -> float:
+    if cfg.roi_mode == "oracle":
+        return float(cfg.center_sigma_oracle)
+    if cfg.roi_mode != "pipeline":
+        raise ValueError(f"Unknown roi_mode={cfg.roi_mode}")
+
+    snr_norm = _clip01(
+        (float(cfg.snr_db) - float(cfg.center_snr_low))
+        / (float(cfg.center_snr_high) - float(cfg.center_snr_low) + 1e-12)
+    )
+    Lmin = max(int(cfg.center_L_min), 1)
+    Lmax = max(int(cfg.center_L_max), Lmin + 1)
+    Lc = max(int(cfg.L), 1)
+    L_norm = _clip01(
+        (np.log2(Lc) - np.log2(Lmin)) / (np.log2(Lmax) - np.log2(Lmin) + 1e-12)
+    )
+    mix = 0.6 * snr_norm + 0.4 * float(L_norm)
+    sigma = float(cfg.center_sigma_max) - (float(cfg.center_sigma_max) - float(cfg.center_sigma_min)) * float(mix)
+    return float(np.clip(sigma, float(cfg.center_sigma_min), float(cfg.center_sigma_max)))
+
+
+def _sample_center(cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    h, w, m = cfg.height, cfg.width, cfg.margin
+    cy0 = (h - 1) * 0.5
+    cx0 = (w - 1) * 0.5
+    sigma = _center_sigma(cfg)
+    trunc = float(cfg.center_trunc)
+    for _ in range(200):
+        dy = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
+        dx = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
+        y = cy0 + dy
+        x = cx0 + dx
+        if (m <= y <= (h - 1 - m)) and (m <= x <= (w - 1 - m)):
+            return np.array([y, x], dtype=np.float32)
+    y = float(np.clip(cy0, m, h - 1 - m))
+    x = float(np.clip(cx0, m, w - 1 - m))
+    return np.array([y, x], dtype=np.float32)
+
+
+def _sample_uniform_point(cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    h, w, m = cfg.height, cfg.width, cfg.margin
+    y = rng.uniform(m, h - 1 - m)
+    x = rng.uniform(m, w - 1 - m)
     return np.array([y, x], dtype=np.float32)
 
 
@@ -89,60 +152,55 @@ def _make_class_centers(label: int, cfg: ToyGenConfig, rng: np.random.Generator)
 
     if label in (0, 1):
         for _ in range(max_tries):
-            p1 = _sample_point(rng, h, w, margin)
+            center = _sample_center(cfg, rng)
             angle = rng.uniform(0.0, 2.0 * np.pi)
             if label == 0:
-                # Keep a safety margin so post-jitter still stays "close".
                 dist = rng.uniform(2.0, max(2.2, cfg.d_close - 1.2))
             else:
                 max_dist = min(float(min(h, w)) * 0.9, 26.0)
-                # Keep a safety margin so post-jitter still stays "far".
                 dist = rng.uniform(cfg.d_far + 1.2, max(cfg.d_far + 1.6, max_dist))
-            delta = np.array([np.sin(angle), np.cos(angle)], dtype=np.float32) * dist
-            p2 = p1 + delta
+
+            half = 0.5 * dist
+            delta = np.array([np.sin(angle), np.cos(angle)], dtype=np.float32) * half
+            p1 = center - delta
+            p2 = center + delta
             if (
-                margin <= p2[0] <= (h - 1 - margin)
+                margin <= p1[0] <= (h - 1 - margin)
+                and margin <= p1[1] <= (w - 1 - margin)
+                and margin <= p2[0] <= (h - 1 - margin)
                 and margin <= p2[1] <= (w - 1 - margin)
             ):
-                centers = np.stack([p1, p2], axis=0).astype(np.float32)
-                d = float(_pairwise_dists(centers)[0, 1])
-                if label == 0 and d < cfg.d_close:
-                    return centers
-                if label == 1 and d > cfg.d_far:
-                    return centers
+                return np.stack([p1, p2], axis=0).astype(np.float32)
         raise RuntimeError("Failed to sample 2-peak geometry.")
 
     if label == 2:
         for _ in range(max_tries):
-            a = _sample_point(rng, h, w, margin)
-            b = _sample_point(rng, h, w, margin)
-            if float(np.linalg.norm(b - a)) < 10.0:
+            center = _sample_center(cfg, rng)
+            angle = rng.uniform(0.0, 2.0 * np.pi)
+            direction = np.array([np.sin(angle), np.cos(angle)], dtype=np.float32)
+            step = rng.uniform(4.8, 8.5)
+
+            a = center - direction * step
+            b = center + direction * step
+            c = center + direction * rng.uniform(-0.6, 0.6) * step
+            perp = np.array([direction[1], -direction[0]], dtype=np.float32)
+            c = c + perp * rng.normal(0.0, cfg.line_max_dist_to_line * 0.35)
+
+            pts = np.stack([a, b, c], axis=0).astype(np.float32)
+            if np.any(pts[:, 0] < margin) or np.any(pts[:, 0] > (h - 1 - margin)):
                 continue
-            t = rng.uniform(0.2, 0.8)
-            base = a + t * (b - a)
-            ab = b - a
-            ab_norm = ab / (np.linalg.norm(ab) + 1e-12)
-            perp = np.array([ab_norm[1], -ab_norm[0]], dtype=np.float32)
-            offset = perp * rng.normal(0.0, cfg.line_max_dist_to_line * 0.4)
-            c = base + offset
-            if not (
-                margin <= c[0] <= (h - 1 - margin) and margin <= c[1] <= (w - 1 - margin)
-            ):
+            if np.any(pts[:, 1] < margin) or np.any(pts[:, 1] > (w - 1 - margin)):
                 continue
-            centers = np.stack([a, b, c], axis=0).astype(np.float32)
-            d_line = _dist_point_to_line(c, a, b)
-            if d_line <= cfg.line_max_dist_to_line:
-                return centers
+            if _dist_point_to_line(c, a, b) <= cfg.line_max_dist_to_line:
+                return pts
         raise RuntimeError("Failed to sample 3-peak line geometry.")
 
     if label == 3:
         for _ in range(max_tries):
-            center = _sample_point(rng, h, w, margin)
+            center = _sample_center(cfg, rng)
             angles = rng.uniform(0.0, 2.0 * np.pi, size=(3,))
             radii = rng.uniform(0.0, cfg.cluster_radius, size=(3,))
-            offsets = np.stack([np.sin(angles) * radii, np.cos(angles) * radii], axis=1).astype(
-                np.float32
-            )
+            offsets = np.stack([np.sin(angles) * radii, np.cos(angles) * radii], axis=1).astype(np.float32)
             points = center[None, :] + offsets
             if np.any(points[:, 0] < margin) or np.any(points[:, 0] > (h - 1 - margin)):
                 continue
@@ -155,6 +213,58 @@ def _make_class_centers(label: int, cfg: ToyGenConfig, rng: np.random.Generator)
         raise RuntimeError("Failed to sample 3-peak cluster geometry.")
 
     raise ValueError(f"Unknown label={label}")
+
+
+def _mean_filter_3x3(img: np.ndarray) -> np.ndarray:
+    pad = 1
+    p = np.pad(img, ((pad, pad), (pad, pad)), mode="reflect")
+    out = (
+        p[:-2, :-2]
+        + p[:-2, 1:-1]
+        + p[:-2, 2:]
+        + p[1:-1, :-2]
+        + p[1:-1, 1:-1]
+        + p[1:-1, 2:]
+        + p[2:, :-2]
+        + p[2:, 1:-1]
+        + p[2:, 2:]
+    ) / 9.0
+    return out.astype(np.float32)
+
+
+def _warp_image(img: np.ndarray, rng: np.random.Generator, strength: float) -> np.ndarray:
+    # Lightweight "mismatch": (a) mild subpixel translation; (b) mild blur/sharpen.
+    h, w = img.shape
+    s = float(max(strength, 0.0))
+    if s <= 1e-6:
+        return img
+
+    if bool(rng.integers(0, 2)):
+        dy = float(rng.normal(0.0, s))
+        dx = float(rng.normal(0.0, s))
+        yy, xx = _meshgrid_xy(h, w)
+        yy = np.clip(yy + dy, 0.0, h - 1.0)
+        xx = np.clip(xx + dx, 0.0, w - 1.0)
+
+        y0 = np.floor(yy).astype(np.int32)
+        x0 = np.floor(xx).astype(np.int32)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+        wy = (yy - y0).astype(np.float32)
+        wx = (xx - x0).astype(np.float32)
+
+        Ia = img[y0, x0]
+        Ib = img[y0, x1]
+        Ic = img[y1, x0]
+        Id = img[y1, x1]
+        out = (1 - wy) * ((1 - wx) * Ia + wx * Ib) + wy * ((1 - wx) * Ic + wx * Id)
+        return out.astype(np.float32)
+
+    blur = _mean_filter_3x3(img)
+    alpha = float(np.clip(s, 0.0, 1.0))
+    if bool(rng.integers(0, 2)):
+        return ((1 - alpha) * img + alpha * blur).astype(np.float32)
+    return (img + alpha * (img - blur)).astype(np.float32)
 
 
 def _add_noise_snr(x_signal: np.ndarray, snr_db: float, L: int, rng: np.random.Generator) -> np.ndarray:
@@ -250,11 +360,41 @@ def generate_sample(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> 
         centers = _make_class_centers(label, cfg, rng)
 
     n_peaks = centers.shape[0]
-    amplitudes = rng.uniform(0.7, 1.4, size=(n_peaks,)).astype(np.float32) * rng.uniform(0.8, 1.2)
-    sigmas = rng.uniform(1.1, 2.4, size=(n_peaks,)).astype(np.float32)
+    amplitudes = rng.uniform(0.6, 1.8, size=(n_peaks,)).astype(np.float32) * rng.uniform(0.75, 1.25)
+    sigmas = rng.uniform(0.9, 3.0, size=(n_peaks,)).astype(np.float32)
+
+    pseudo_centers = np.zeros((0, 2), dtype=np.float32)
+    pseudo_amp = np.zeros((0,), dtype=np.float32)
+    pseudo_sig = np.zeros((0,), dtype=np.float32)
+    if float(cfg.pseudo_peak_prob) > 0.0 and rng.random() < float(cfg.pseudo_peak_prob):
+        k = int(rng.integers(0, int(cfg.pseudo_peak_max) + 1))
+        if k > 0:
+            pseudo_centers = np.stack([_sample_uniform_point(cfg, rng) for _ in range(k)], axis=0).astype(np.float32)
+            pseudo_sig = rng.uniform(2.4, 4.8, size=(k,)).astype(np.float32)
+            base = float(np.median(amplitudes))
+            pseudo_amp = (rng.uniform(0.08, 0.28, size=(k,)).astype(np.float32) * base).astype(np.float32)
 
     x_signal = _render_gaussian_peaks(cfg.height, cfg.width, centers, amplitudes, sigmas)
-    x = _add_noise_snr(x_signal, cfg.snr_db, cfg.L, rng)
+    if pseudo_centers.shape[0] > 0:
+        x_signal = x_signal + _render_gaussian_peaks(cfg.height, cfg.width, pseudo_centers, pseudo_amp, pseudo_sig)
+
+    if float(cfg.warp_prob) > 0.0 and rng.random() < float(cfg.warp_prob):
+        x_signal = _warp_image(x_signal, rng=rng, strength=float(cfg.warp_strength))
+
+    if float(cfg.corr_noise_prob) > 0.0 and rng.random() < float(cfg.corr_noise_prob):
+        sig_power = float(np.mean(x_signal**2) + 1e-12)
+        snr_lin = float(10.0 ** (float(cfg.snr_db) / 10.0))
+        noise_power = sig_power / max(snr_lin, 1e-12)
+        noise_std = float(np.sqrt(noise_power))
+        L = int(max(int(cfg.L), 1))
+        noise = rng.normal(0.0, noise_std, size=(L, *x_signal.shape)).astype(np.float32).mean(axis=0)
+        smooth = _mean_filter_3x3(noise)
+        a = float(np.clip(float(cfg.corr_strength), 0.0, 1.0))
+        corr = (1 - a) * noise + a * smooth
+        corr = corr * (float(noise.std() + 1e-6) / float(corr.std() + 1e-6))
+        x = x_signal + corr.astype(np.float32)
+    else:
+        x = _add_noise_snr(x_signal, cfg.snr_db, cfg.L, rng)
     x = np.clip(x, 0.0, None).astype(np.float32)
 
     x0 = np.log(x + cfg.eps).astype(np.float32)

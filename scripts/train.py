@@ -81,6 +81,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
+        roi_mode=args.roi_mode,
+        center_sigma_oracle=args.center_sigma_oracle,
+        center_sigma_min=args.center_sigma_min,
+        center_sigma_max=args.center_sigma_max,
+        pseudo_peak_prob=args.pseudo_peak_prob,
+        pseudo_peak_max=args.pseudo_peak_max,
+        warp_prob=args.warp_prob,
+        warp_strength=args.warp_strength,
+        corr_noise_prob=args.corr_noise_prob,
+        corr_strength=args.corr_strength,
         enable_aug=not args.no_aug,
         height=args.patch_size,
         width=args.patch_size,
@@ -94,6 +104,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
+        roi_mode=args.roi_mode,
+        center_sigma_oracle=args.center_sigma_oracle,
+        center_sigma_min=args.center_sigma_min,
+        center_sigma_max=args.center_sigma_max,
+        pseudo_peak_prob=args.pseudo_peak_prob,
+        pseudo_peak_max=args.pseudo_peak_max,
+        warp_prob=args.warp_prob,
+        warp_strength=args.warp_strength,
+        corr_noise_prob=args.corr_noise_prob,
+        corr_strength=args.corr_strength,
         enable_aug=False,
         height=args.patch_size,
         width=args.patch_size,
@@ -107,6 +127,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
+        roi_mode=args.roi_mode,
+        center_sigma_oracle=args.center_sigma_oracle,
+        center_sigma_min=args.center_sigma_min,
+        center_sigma_max=args.center_sigma_max,
+        pseudo_peak_prob=args.pseudo_peak_prob,
+        pseudo_peak_max=args.pseudo_peak_max,
+        warp_prob=args.warp_prob,
+        warp_strength=args.warp_strength,
+        corr_noise_prob=args.corr_noise_prob,
+        corr_strength=args.corr_strength,
         enable_aug=False,
         height=args.patch_size,
         width=args.patch_size,
@@ -243,6 +273,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                roi_mode=args.roi_mode,
+                center_sigma_oracle=args.center_sigma_oracle,
+                center_sigma_min=args.center_sigma_min,
+                center_sigma_max=args.center_sigma_max,
+                pseudo_peak_prob=args.pseudo_peak_prob,
+                pseudo_peak_max=args.pseudo_peak_max,
+                warp_prob=args.warp_prob,
+                warp_strength=args.warp_strength,
+                corr_noise_prob=args.corr_noise_prob,
+                corr_strength=args.corr_strength,
             )
             loader_cond = DataLoader(
                 ds_cond,
@@ -353,6 +393,17 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--patch_size", type=int, default=41)
     p.add_argument("--normalize", type=str, default="per_sample", choices=["none", "per_sample"])
     p.add_argument("--no_aug", action="store_true")
+
+    p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
+    p.add_argument("--center_sigma_oracle", type=float, default=1.0)
+    p.add_argument("--center_sigma_min", type=float, default=1.5)
+    p.add_argument("--center_sigma_max", type=float, default=6.0)
+    p.add_argument("--pseudo_peak_prob", type=float, default=0.35)
+    p.add_argument("--pseudo_peak_max", type=int, default=2)
+    p.add_argument("--warp_prob", type=float, default=0.25)
+    p.add_argument("--warp_strength", type=float, default=0.6)
+    p.add_argument("--corr_noise_prob", type=float, default=0.25)
+    p.add_argument("--corr_strength", type=float, default=0.6)
 
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=256)
