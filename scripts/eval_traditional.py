@@ -99,7 +99,7 @@ def _build_method(method: str, seed: int) -> Any:
     if method == "svm_linear":
         return Pipeline([("scaler", StandardScaler()), ("clf", LinearSVC(dual="auto", max_iter=5000))])
     if method == "knn":
-        return Pipeline([("scaler", StandardScaler()), ("clf", KNeighborsClassifier(n_neighbors=5))])
+        return Pipeline([("scaler", StandardScaler()), ("clf", KNeighborsClassifier(n_neighbors=5, n_jobs=-1))])
     if method == "rf":
         return RandomForestClassifier(n_estimators=300, random_state=seed, n_jobs=-1)
     if method == "logreg":
@@ -131,6 +131,17 @@ def _choose_test_subset(ds_test, cond_test_samples: int, seed: int) -> Subset:
     return Subset(ds_test, idx)
 
 
+def _choose_subset(ds, k: int, seed: int) -> Subset:
+    n = len(ds)
+    k = int(k)
+    if k <= 0 or k >= n:
+        return Subset(ds, list(range(n)))
+    seed32 = int(seed) % (2**32 - 1)
+    rng = np.random.default_rng(seed32)
+    idx = rng.permutation(n)[:k].tolist()
+    return Subset(ds, idx)
+
+
 @dataclass
 class RepeatAggregate:
     method: str
@@ -146,51 +157,49 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
         for k, v in {**vars(args), "repeat_idx": repeat_idx, "seed": seed}.items():
             f.write(f"{k}: {v}\n")
 
-    # Evaluate each method across conditions, then compute all-conditions aggregate.
+    # Evaluate per (SNR,L) condition. For speed: generate/flatten features once per condition,
+    # then fit/predict for each method using the same arrays.
     by_condition_rows: list[dict[str, Any]] = []
-    aggregates: list[RepeatAggregate] = []
+    method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
+    method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
 
-    for method in args.methods:
-        y_true_all: list[np.ndarray] = []
-        y_pred_all: list[np.ndarray] = []
+    for snr_db in args.snr_list:
+        for L in args.L_list:
+            cond_seed = seed + int(float(snr_db) * 100) + int(L) * 10000
+            ds_train_full = make_fixed_condition_dataset(
+                split="train",
+                total_samples=args.total_samples,
+                split_ratio=args.split,
+                base_seed=seed,
+                snr_db=float(snr_db),
+                L=int(L),
+                hf_mode=args.hf_mode,
+                normalize=args.normalize,
+                enable_aug=False,
+                height=args.patch_size,
+                width=args.patch_size,
+            )
+            ds_test_full = make_fixed_condition_dataset(
+                split="test",
+                total_samples=args.total_samples,
+                split_ratio=args.split,
+                base_seed=seed,
+                snr_db=float(snr_db),
+                L=int(L),
+                hf_mode=args.hf_mode,
+                normalize=args.normalize,
+                enable_aug=False,
+                height=args.patch_size,
+                width=args.patch_size,
+            )
 
-        for snr_db in args.snr_list:
-            for L in args.L_list:
-                ds_train = make_fixed_condition_dataset(
-                    split="train",
-                    total_samples=args.total_samples,
-                    split_ratio=args.split,
-                    base_seed=seed,
-                    snr_db=float(snr_db),
-                    L=int(L),
-                    hf_mode=args.hf_mode,
-                    normalize=args.normalize,
-                    enable_aug=False,
-                    height=args.patch_size,
-                    width=args.patch_size,
-                )
-                ds_test_full = make_fixed_condition_dataset(
-                    split="test",
-                    total_samples=args.total_samples,
-                    split_ratio=args.split,
-                    base_seed=seed,
-                    snr_db=float(snr_db),
-                    L=int(L),
-                    hf_mode=args.hf_mode,
-                    normalize=args.normalize,
-                    enable_aug=False,
-                    height=args.patch_size,
-                    width=args.patch_size,
-                )
-                ds_test = _choose_test_subset(
-                    ds_test_full,
-                    cond_test_samples=args.cond_test_samples,
-                    seed=seed + int(float(snr_db) * 100) + int(L) * 10000,
-                )
+            ds_train = _choose_subset(ds_train_full, k=args.cond_train_samples, seed=cond_seed + 7)
+            ds_test = _choose_test_subset(ds_test_full, cond_test_samples=args.cond_test_samples, seed=cond_seed + 13)
 
-                Xtr, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
-                Xte, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+            Xtr, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
+            Xte, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
 
+            for method in args.methods:
                 clf = _build_method(method, seed=seed)
                 clf.fit(Xtr, ytr)
                 y_pred = clf.predict(Xte).astype(np.int64, copy=False)
@@ -208,45 +217,49 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                     }
                 )
 
-                tag = f"{_sanitize_tag(method)}_snr{float(snr_db):g}_L{int(L)}"
-                save_confusion_matrix_png(
-                    cm,
-                    CLASS_NAMES,
-                    os.path.join(repeat_dir, f"confusion_{tag}_count.png"),
-                    normalize=False,
-                    title=f"{method} | count | SNR={float(snr_db):g}dB L={int(L)}",
-                )
-                save_confusion_matrix_png(
-                    cm,
-                    CLASS_NAMES,
-                    os.path.join(repeat_dir, f"confusion_{tag}_norm.png"),
-                    normalize=True,
-                    title=f"{method} | row-norm | SNR={float(snr_db):g}dB L={int(L)}",
-                )
+                if not args.no_plots and not args.no_per_condition_plots:
+                    tag = f"{_sanitize_tag(method)}_snr{float(snr_db):g}_L{int(L)}"
+                    save_confusion_matrix_png(
+                        cm,
+                        CLASS_NAMES,
+                        os.path.join(repeat_dir, f"confusion_{tag}_count.png"),
+                        normalize=False,
+                        title=f"{method} | count | SNR={float(snr_db):g}dB L={int(L)}",
+                    )
+                    save_confusion_matrix_png(
+                        cm,
+                        CLASS_NAMES,
+                        os.path.join(repeat_dir, f"confusion_{tag}_norm.png"),
+                        normalize=True,
+                        title=f"{method} | row-norm | SNR={float(snr_db):g}dB L={int(L)}",
+                    )
 
-                y_true_all.append(yte.astype(np.int64, copy=False))
-                y_pred_all.append(y_pred)
+                method_to_y_true_all[method].append(yte.astype(np.int64, copy=False))
+                method_to_y_pred_all[method].append(y_pred)
 
-        y_true_all_np = np.concatenate(y_true_all, axis=0)
-        y_pred_all_np = np.concatenate(y_pred_all, axis=0)
+    aggregates: list[RepeatAggregate] = []
+    for method in args.methods:
+        y_true_all_np = np.concatenate(method_to_y_true_all[method], axis=0)
+        y_pred_all_np = np.concatenate(method_to_y_pred_all[method], axis=0)
         m_all = compute_metrics(y_true_all_np, y_pred_all_np)
         cm_all = compute_confusion(y_true_all_np, y_pred_all_np, num_classes=args.num_classes)
 
-        tag_all = f"{_sanitize_tag(method)}_all_conditions"
-        save_confusion_matrix_png(
-            cm_all,
-            CLASS_NAMES,
-            os.path.join(repeat_dir, f"confusion_{tag_all}_count.png"),
-            normalize=False,
-            title=f"{method} | count | all conditions",
-        )
-        save_confusion_matrix_png(
-            cm_all,
-            CLASS_NAMES,
-            os.path.join(repeat_dir, f"confusion_{tag_all}_norm.png"),
-            normalize=True,
-            title=f"{method} | row-norm | all conditions",
-        )
+        if not args.no_plots:
+            tag_all = f"{_sanitize_tag(method)}_all_conditions"
+            save_confusion_matrix_png(
+                cm_all,
+                CLASS_NAMES,
+                os.path.join(repeat_dir, f"confusion_{tag_all}_count.png"),
+                normalize=False,
+                title=f"{method} | count | all conditions",
+            )
+            save_confusion_matrix_png(
+                cm_all,
+                CLASS_NAMES,
+                os.path.join(repeat_dir, f"confusion_{tag_all}_norm.png"),
+                normalize=True,
+                title=f"{method} | row-norm | all conditions",
+            )
 
         aggregates.append(RepeatAggregate(method=method, accuracy=float(m_all.accuracy), macro_f1=float(m_all.macro_f1)))
 
@@ -303,6 +316,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--split", type=float, nargs=3, default=[0.7, 0.15, 0.15])
     p.add_argument("--repeat", type=int, default=1)
     p.add_argument("--cond_test_samples", type=int, default=6000)
+    p.add_argument(
+        "--cond_train_samples",
+        type=int,
+        default=0,
+        help="Per-condition train subsample size (0 = use full train split). Useful to speed up heavy methods (e.g., svm_rbf).",
+    )
 
     p.add_argument(
         "--methods",
@@ -315,6 +334,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--num_classes", type=int, default=4)
+    p.add_argument("--no_plots", action="store_true", help="Disable saving all confusion matrix PNGs.")
+    p.add_argument(
+        "--no_per_condition_plots",
+        action="store_true",
+        help="Only save all-conditions confusion matrices (skip per-(SNR,L) PNGs).",
+    )
     return p
 
 
