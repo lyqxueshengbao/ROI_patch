@@ -39,7 +39,7 @@ def _render_gaussian_peaks(
 ) -> np.ndarray:
     yy, xx = _meshgrid_xy(height, width)
     x = np.zeros((height, width), dtype=np.float32)
-    for (cy, cx), a, s in zip(centers_yx, amplitudes, sigmas, strict=True):
+    for (cy, cx), a, s in zip(centers_yx, amplitudes, sigmas):
         dy2 = (yy - cy) ** 2
         dx2 = (xx - cx) ** 2
         x += a * np.exp(-(dx2 + dy2) / (2.0 * (s**2)))
