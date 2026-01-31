@@ -42,13 +42,27 @@ class ToyGenConfig:
     corr_noise_prob: float = 0.25
     corr_strength: float = 0.6
 
-    # Occlusion / cutout (simulates ROI truncation/occlusion when the true structure is close to
-    # the ROI boundary due to pipeline detection/localization errors).
+    # Occlusion / truncation.
+    #
+    # v2 default uses "border" cut to mimic ROI crop errors: due to pipeline detection/localization
+    # errors, the true structure can be close to the ROI boundary and gets truncated ("贴边被裁掉").
+    # Filling with zeros before log creates a learnable high-frequency boundary cue for CNNs,
+    # while peak-geometry hand-crafted features become less stable.
     enable_occlude: bool = True
-    occlude_prob: float = 0.25
-    occlude_max_blocks: int = 2
-    occlude_min_size: int = 6
-    occlude_max_size: int = 16
+    occlude_mode: Literal["none", "block", "border"] = "border"
+
+    # Border-cut (preferred v2)
+    border_prob: float = 0.35
+    border_sides: Literal["one", "two", "rand12"] = "rand12"
+    border_min: int = 4
+    border_max: int = 14
+    border_fill: Literal["zero", "min", "mean"] = "zero"
+
+    # Block cutout (legacy/v1; keep available but default weaker)
+    occlude_prob: float = 0.05
+    occlude_max_blocks: int = 1
+    occlude_min_size: int = 4
+    occlude_max_size: int = 10
     occlude_fill: Literal["zero", "mean"] = "mean"
     d_close: float = 6.0
     d_far: float = 14.0
@@ -277,24 +291,72 @@ def _sample_roi_offset(cfg: ToyGenConfig, rng: np.random.Generator) -> tuple[flo
     return dy, dx
 
 
-def _apply_occlusion(img: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
-    # Random cutout to mimic local information loss caused by ROI truncation/occlusion.
-    # Applied on the linear/intensity image (log before) to emulate measurement/cropping loss.
-    if not bool(cfg.enable_occlude):
-        return img.astype(np.float32, copy=False)
-    if rng.random() >= float(cfg.occlude_prob):
-        return img.astype(np.float32, copy=False)
+def _apply_border_cut(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    # Border truncation (ROI crop error): fill a border band with zeros/mean/min.
+    # Apply on log-pre intensity map to emulate measurement/cropping information loss.
+    if rng.random() >= float(cfg.border_prob):
+        return x.astype(np.float32, copy=False)
 
-    H, W = img.shape
+    H, W = x.shape
+    bmin = int(max(int(cfg.border_min), 1))
+    bmax = int(max(int(cfg.border_max), bmin))
+    bw = int(rng.integers(bmin, bmax + 1))
+    bw = int(min(bw, min(H, W)))
+
+    fill_mode = str(cfg.border_fill)
+    if fill_mode == "mean":
+        fill_val = float(x.mean())
+    elif fill_mode == "min":
+        fill_val = float(x.min())
+    else:
+        fill_val = 0.0
+
+    sides_mode = str(cfg.border_sides)
+    if sides_mode == "rand12":
+        sides_mode = "one" if (rng.random() < 0.5) else "two"
+
+    out = x.astype(np.float32, copy=True)
+
+    if sides_mode == "one":
+        side = str(rng.choice(["top", "bottom", "left", "right"]))
+        if side == "top":
+            out[:bw, :] = np.float32(fill_val)
+        elif side == "bottom":
+            out[H - bw :, :] = np.float32(fill_val)
+        elif side == "left":
+            out[:, :bw] = np.float32(fill_val)
+        else:
+            out[:, W - bw :] = np.float32(fill_val)
+        return out.astype(np.float32, copy=False)
+
+    if sides_mode == "two":
+        # Two opposite sides: either top+bottom or left+right.
+        if bool(rng.integers(0, 2)):
+            out[:bw, :] = np.float32(fill_val)
+            out[H - bw :, :] = np.float32(fill_val)
+        else:
+            out[:, :bw] = np.float32(fill_val)
+            out[:, W - bw :] = np.float32(fill_val)
+        return out.astype(np.float32, copy=False)
+
+    raise ValueError(f"Unknown border_sides={cfg.border_sides}")
+
+
+def _apply_block_occlusion(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    # Legacy v1 random block cutout inside the patch.
+    if rng.random() >= float(cfg.occlude_prob):
+        return x.astype(np.float32, copy=False)
+
+    H, W = x.shape
     max_blocks = int(max(int(cfg.occlude_max_blocks), 1))
     blocks = int(rng.integers(1, max_blocks + 1))
 
     hmin = int(max(int(cfg.occlude_min_size), 1))
     hmax = int(max(int(cfg.occlude_max_size), hmin))
     fill_mode = str(cfg.occlude_fill)
-    fill_val = float(img.mean()) if fill_mode == "mean" else 0.0
+    fill_val = float(x.mean()) if fill_mode == "mean" else 0.0
 
-    out = img.astype(np.float32, copy=True)
+    out = x.astype(np.float32, copy=True)
     for _ in range(blocks):
         bh = int(rng.integers(hmin, hmax + 1))
         bw = int(rng.integers(hmin, hmax + 1))
@@ -304,6 +366,20 @@ def _apply_occlusion(img: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generato
         x0 = int(rng.integers(0, W - bw + 1))
         out[y0 : y0 + bh, x0 : x0 + bw] = np.float32(fill_val)
     return out.astype(np.float32, copy=False)
+
+
+def _apply_occlusion(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    if not bool(cfg.enable_occlude):
+        return x.astype(np.float32, copy=False)
+
+    mode = str(cfg.occlude_mode)
+    if mode == "none":
+        return x.astype(np.float32, copy=False)
+    if mode == "border":
+        return _apply_border_cut(x, cfg, rng)
+    if mode == "block":
+        return _apply_block_occlusion(x, cfg, rng)
+    raise ValueError(f"Unknown occlude_mode={cfg.occlude_mode}")
 
 
 def _warp_image(img: np.ndarray, rng: np.random.Generator, strength: float) -> np.ndarray:
@@ -460,8 +536,8 @@ def generate_sample(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> 
         dy, dx = _sample_roi_offset(cfg, rng)
         x = _shift_bilinear(x, dy=dy, dx=dx)
 
-    # Occlusion/cutout: simulates ROI truncation/遮挡导致的局部信息缺失（更像 pipeline ROI
-    # 误差让结构贴边/被裁掉），对 hand-crafted/几何类特征更不稳定，但 CNN 可学习残缺形态。
+    # Occlusion/truncation (v2 default: border-cut):
+    # simulate ROI alignment error propagation causing border truncation of the true structure.
     x = _apply_occlusion(x, cfg, rng)
 
     x0 = np.log(x + cfg.eps).astype(np.float32)

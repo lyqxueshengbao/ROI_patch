@@ -37,10 +37,12 @@ def _profile_params(profile: AugProfile) -> dict:
             "warp_prob": 0.10,
             "warp_strength": 0.30,
             "corr_strength": 0.30,
-            "occlude_prob": 0.05,
-            "occlude_max_blocks": 1,
-            "occlude_min_size": 4,
-            "occlude_max_size": 10,
+            # v2 border-cut (train-time nonzero to improve shifted robustness)
+            "border_prob": 0.15,
+            "border_min": 3,
+            "border_max": 8,
+            "border_sides": "one",
+            "border_fill": "zero",
         }
     if profile == "pipeline":
         return {
@@ -49,10 +51,12 @@ def _profile_params(profile: AugProfile) -> dict:
             "warp_prob": 0.25,
             "warp_strength": 0.60,
             "corr_strength": 0.60,
-            "occlude_prob": 0.25,
-            "occlude_max_blocks": 2,
-            "occlude_min_size": 6,
-            "occlude_max_size": 16,
+            # v2 border-cut (stronger, mimics pipeline ROI crop/truncation)
+            "border_prob": 0.40,
+            "border_min": 5,
+            "border_max": 14,
+            "border_sides": "rand12",
+            "border_fill": "zero",
         }
     raise ValueError(f"Unknown profile={profile}")
 
@@ -92,11 +96,12 @@ def make_cfg(
         corr_noise_prob=float(p["corr_noise_prob"]),
         corr_strength=float(p["corr_strength"]),
         enable_occlude=True,
-        occlude_prob=float(p["occlude_prob"]),
-        occlude_max_blocks=int(p["occlude_max_blocks"]),
-        occlude_min_size=int(p["occlude_min_size"]),
-        occlude_max_size=int(p["occlude_max_size"]),
-        occlude_fill="mean",
+        occlude_mode="border",
+        border_prob=float(p["border_prob"]),
+        border_min=int(p["border_min"]),
+        border_max=int(p["border_max"]),
+        border_sides=str(p["border_sides"]),  # type: ignore[arg-type]
+        border_fill=str(p["border_fill"]),  # type: ignore[arg-type]
         enable_aug=bool(enable_aug),
     )
 
@@ -124,10 +129,16 @@ class ToyROIPatchDataset(Dataset):
         corr_noise_prob: float = 0.25,
         corr_strength: float = 0.6,
         enable_occlude: bool = True,
-        occlude_prob: float = 0.25,
-        occlude_max_blocks: int = 2,
-        occlude_min_size: int = 6,
-        occlude_max_size: int = 16,
+        occlude_mode: Literal["none", "block", "border"] = "border",
+        border_prob: float = 0.35,
+        border_sides: Literal["one", "two", "rand12"] = "rand12",
+        border_min: int = 4,
+        border_max: int = 14,
+        border_fill: Literal["zero", "min", "mean"] = "zero",
+        occlude_prob: float = 0.05,
+        occlude_max_blocks: int = 1,
+        occlude_min_size: int = 4,
+        occlude_max_size: int = 10,
         occlude_fill: Literal["zero", "mean"] = "mean",
         enable_aug: bool = True,
         num_classes: int = 4,
@@ -155,6 +166,12 @@ class ToyROIPatchDataset(Dataset):
         self.corr_noise_prob = float(corr_noise_prob)
         self.corr_strength = float(corr_strength)
         self.enable_occlude = bool(enable_occlude)
+        self.occlude_mode = occlude_mode
+        self.border_prob = float(border_prob)
+        self.border_sides = border_sides
+        self.border_min = int(border_min)
+        self.border_max = int(border_max)
+        self.border_fill = border_fill
         self.occlude_prob = float(occlude_prob)
         self.occlude_max_blocks = int(occlude_max_blocks)
         self.occlude_min_size = int(occlude_min_size)
@@ -237,6 +254,12 @@ class ToyROIPatchDataset(Dataset):
                 corr_noise_prob=self.corr_noise_prob,
                 corr_strength=self.corr_strength,
                 enable_occlude=self.enable_occlude,
+                occlude_mode=self.occlude_mode,
+                border_prob=self.border_prob,
+                border_sides=self.border_sides,
+                border_min=self.border_min,
+                border_max=self.border_max,
+                border_fill=self.border_fill,
                 occlude_prob=self.occlude_prob,
                 occlude_max_blocks=self.occlude_max_blocks,
                 occlude_min_size=self.occlude_min_size,
@@ -274,10 +297,16 @@ def make_fixed_condition_dataset(
     corr_noise_prob: float = 0.25,
     corr_strength: float = 0.6,
     enable_occlude: bool = True,
-    occlude_prob: float = 0.25,
-    occlude_max_blocks: int = 2,
-    occlude_min_size: int = 6,
-    occlude_max_size: int = 16,
+    occlude_mode: Literal["none", "block", "border"] = "border",
+    border_prob: float = 0.35,
+    border_sides: Literal["one", "two", "rand12"] = "rand12",
+    border_min: int = 4,
+    border_max: int = 14,
+    border_fill: Literal["zero", "min", "mean"] = "zero",
+    occlude_prob: float = 0.05,
+    occlude_max_blocks: int = 1,
+    occlude_min_size: int = 4,
+    occlude_max_size: int = 10,
     occlude_fill: Literal["zero", "mean"] = "mean",
 ) -> ToyROIPatchDataset:
     return ToyROIPatchDataset(
@@ -301,6 +330,12 @@ def make_fixed_condition_dataset(
         corr_noise_prob=corr_noise_prob,
         corr_strength=corr_strength,
         enable_occlude=enable_occlude,
+        occlude_mode=occlude_mode,
+        border_prob=border_prob,
+        border_sides=border_sides,
+        border_min=border_min,
+        border_max=border_max,
+        border_fill=border_fill,
         occlude_prob=occlude_prob,
         occlude_max_blocks=occlude_max_blocks,
         occlude_min_size=occlude_min_size,
