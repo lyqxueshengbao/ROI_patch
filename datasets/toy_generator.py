@@ -41,6 +41,15 @@ class ToyGenConfig:
     warp_strength: float = 0.6
     corr_noise_prob: float = 0.25
     corr_strength: float = 0.6
+
+    # Occlusion / cutout (simulates ROI truncation/occlusion when the true structure is close to
+    # the ROI boundary due to pipeline detection/localization errors).
+    enable_occlude: bool = True
+    occlude_prob: float = 0.25
+    occlude_max_blocks: int = 2
+    occlude_min_size: int = 6
+    occlude_max_size: int = 16
+    occlude_fill: Literal["zero", "mean"] = "mean"
     d_close: float = 6.0
     d_far: float = 14.0
     line_max_dist_to_line: float = 1.3
@@ -268,6 +277,35 @@ def _sample_roi_offset(cfg: ToyGenConfig, rng: np.random.Generator) -> tuple[flo
     return dy, dx
 
 
+def _apply_occlusion(img: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    # Random cutout to mimic local information loss caused by ROI truncation/occlusion.
+    # Applied on the linear/intensity image (log before) to emulate measurement/cropping loss.
+    if not bool(cfg.enable_occlude):
+        return img.astype(np.float32, copy=False)
+    if rng.random() >= float(cfg.occlude_prob):
+        return img.astype(np.float32, copy=False)
+
+    H, W = img.shape
+    max_blocks = int(max(int(cfg.occlude_max_blocks), 1))
+    blocks = int(rng.integers(1, max_blocks + 1))
+
+    hmin = int(max(int(cfg.occlude_min_size), 1))
+    hmax = int(max(int(cfg.occlude_max_size), hmin))
+    fill_mode = str(cfg.occlude_fill)
+    fill_val = float(img.mean()) if fill_mode == "mean" else 0.0
+
+    out = img.astype(np.float32, copy=True)
+    for _ in range(blocks):
+        bh = int(rng.integers(hmin, hmax + 1))
+        bw = int(rng.integers(hmin, hmax + 1))
+        bh = int(min(bh, H))
+        bw = int(min(bw, W))
+        y0 = int(rng.integers(0, H - bh + 1))
+        x0 = int(rng.integers(0, W - bw + 1))
+        out[y0 : y0 + bh, x0 : x0 + bw] = np.float32(fill_val)
+    return out.astype(np.float32, copy=False)
+
+
 def _warp_image(img: np.ndarray, rng: np.random.Generator, strength: float) -> np.ndarray:
     # Lightweight "mismatch": (a) mild subpixel translation; (b) mild blur/sharpen.
     s = float(max(strength, 0.0))
@@ -421,6 +459,10 @@ def generate_sample(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> 
         # In "pipeline" mode, the offset scale is SNR/L-dependent via `_center_sigma(cfg)`.
         dy, dx = _sample_roi_offset(cfg, rng)
         x = _shift_bilinear(x, dy=dy, dx=dx)
+
+    # Occlusion/cutout: simulates ROI truncation/遮挡导致的局部信息缺失（更像 pipeline ROI
+    # 误差让结构贴边/被裁掉），对 hand-crafted/几何类特征更不稳定，但 CNN 可学习残缺形态。
+    x = _apply_occlusion(x, cfg, rng)
 
     x0 = np.log(x + cfg.eps).astype(np.float32)
     if cfg.hf_mode == "laplacian":
