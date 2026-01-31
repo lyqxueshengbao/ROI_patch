@@ -63,3 +63,14 @@ py eval.py --ckpt runs/hf_gated_toy/repeat_000/best.pt ^
 py eval.py --ckpt_dir runs/hf_gated_toy --snr_list -5 0 5 10 --L_list 1 4 16
 ```
 
+## Diagnostics: shortcut checks (border-jam / border-cut)
+
+If you add border-based augmentation (e.g., border-jam) and performance behaves unexpectedly, use these tools to detect whether the augmentation injects a *boundary shortcut*:
+
+1) **Handcrafted feature ablation (peaks vs stats)**
+   - Run `eval_traditional.py` with `--methods handfeat_svm` and select `--handfeat_mode {full,peaks_only,stats_only}`.
+   - If `stats_only` stays strong (or improves) under border-jam, it suggests the boundary artifact is being exploited as a shortcut.
+
+2) **Edge-shortcut baseline (boundary-only classifier)**
+   - Run `diagnose_edge_shortcut.py` to train a linear classifier using only boundary-band statistics.
+   - If Macro-F1 is high, your border augmentation likely encodes class information at the boundary (shortcut), and should be revised/removed.

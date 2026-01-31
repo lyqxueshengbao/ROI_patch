@@ -15,7 +15,7 @@ import csv
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import numpy as np
 import torch
@@ -44,6 +44,12 @@ def _sanitize_tag(x: str) -> str:
     x = x.replace(".", "p")
     x = x.replace("+", "")
     return x
+
+
+def _method_run_name(method: str, handfeat_mode: str) -> str:
+    if method.startswith("handfeat") and str(handfeat_mode) != "full":
+        return f"{method}__{handfeat_mode}"
+    return method
 
 
 def _preview_cfg(
@@ -146,12 +152,19 @@ def _spectral_entropy_2d(img: np.ndarray) -> float:
     return float(-(p * np.log(p + 1e-12)).sum())
 
 
-def _hand_features_from_sample(x_chw: np.ndarray) -> np.ndarray:
-    # x_chw: [2,H,W] (X0, Xhf)
-    x0 = x_chw[0]
-    xhf = x_chw[1]
+def extract_handcrafted_features(
+    x_chw: np.ndarray,
+    *,
+    mode: Literal["full", "peaks_only", "stats_only"] = "full",
+    topk: int = 3,
+) -> np.ndarray:
+    # x_chw: [2,H,W] (X0, Xhf). Default mode="full" is backward-compatible with the previous
+    # handfeat_svm feature vector ordering and values.
+    x0 = x_chw[0].astype(np.float32, copy=False)
+    xhf = x_chw[1].astype(np.float32, copy=False)
     h, w = x0.shape
-    k = 3
+    k = int(topk)
+
     flat = x0.reshape(-1)
     if flat.size >= k:
         idx = np.argpartition(flat, -k)[-k:]
@@ -160,6 +173,7 @@ def _hand_features_from_sample(x_chw: np.ndarray) -> np.ndarray:
         idx = np.arange(flat.size)
         idx = idx[np.argsort(flat[idx])[::-1]]
         idx = np.pad(idx, (0, k - idx.size), mode="edge")
+
     ys = (idx // w).astype(np.float32)
     xs = (idx % w).astype(np.float32)
     vals = flat[idx].astype(np.float32)
@@ -173,9 +187,19 @@ def _hand_features_from_sample(x_chw: np.ndarray) -> np.ndarray:
     d = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2) + 1e-12).astype(np.float32)
     d12, d13, d23 = float(d[0, 1]), float(d[0, 2]), float(d[1, 2])
     diag = float(np.sqrt((h - 1) ** 2 + (w - 1) ** 2) + 1e-6)
-    d_norm = np.array([d12, d13, d23], dtype=np.float32) / diag
+    d_norm = (np.array([d12, d13, d23], dtype=np.float32) / diag).astype(np.float32)
 
-    # energy concentration (using shifted nonnegative energy proxy)
+    # peaks-only features (explicit top-k peak values/coords/geometry)
+    peaks_feat = np.concatenate(
+        [
+            vals,  # k
+            np.stack([ny, nx], axis=1).reshape(-1).astype(np.float32),  # 2k
+            d_norm.astype(np.float32),  # 3
+        ],
+        axis=0,
+    ).astype(np.float32)
+
+    # stats-only features (no explicit peak coordinates)
     z = x0 - float(x0.min())
     e = (z.astype(np.float64) ** 2).reshape(-1)
     total_e = float(e.sum() + 1e-12)
@@ -184,37 +208,32 @@ def _hand_features_from_sample(x_chw: np.ndarray) -> np.ndarray:
     conc = float(e[idxe].sum() / total_e)
 
     ent = _spectral_entropy_2d(x0)
-    stats = np.array(
-        [
-            float(x0.mean()),
-            float(x0.std()),
-            float(xhf.mean()),
-            float(xhf.std()),
-        ],
-        dtype=np.float32,
-    )
+    stats = np.array([float(x0.mean()), float(x0.std()), float(xhf.mean()), float(xhf.std())], dtype=np.float32)
+    stats_feat = np.concatenate([np.array([conc, ent], dtype=np.float32), stats], axis=0).astype(np.float32)
 
-    feat = np.concatenate(
-        [
-            vals,  # 3
-            np.stack([ny, nx], axis=1).reshape(-1).astype(np.float32),  # 6
-            d_norm.astype(np.float32),  # 3
-            np.array([conc, ent], dtype=np.float32),  # 2
-            stats,  # 4
-        ],
-        axis=0,
-    ).astype(np.float32)
-    return feat
+    if mode == "peaks_only":
+        return peaks_feat
+    if mode == "stats_only":
+        return stats_feat
+    if mode == "full":
+        return np.concatenate([peaks_feat, stats_feat], axis=0).astype(np.float32)
+    raise ValueError(f"Unknown handfeat mode: {mode}")
 
 
-def _to_numpy_handfeat_xy(dataset, batch_size: int, num_workers: int) -> tuple[np.ndarray, np.ndarray]:
+def _to_numpy_handfeat_xy(
+    dataset,
+    batch_size: int,
+    num_workers: int,
+    *,
+    mode: Literal["full", "peaks_only", "stats_only"] = "full",
+) -> tuple[np.ndarray, np.ndarray]:
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     xs: list[np.ndarray] = []
     ys: list[np.ndarray] = []
     for xb, yb in loader:
         # xb: [B,2,H,W]
         xb_np = xb.numpy().astype(np.float32, copy=False)
-        feats = np.stack([_hand_features_from_sample(xb_np[i]) for i in range(xb_np.shape[0])], axis=0)
+        feats = np.stack([extract_handcrafted_features(xb_np[i], mode=mode) for i in range(xb_np.shape[0])], axis=0)
         xs.append(feats)
         ys.append(yb.numpy().astype(np.int64, copy=False))
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
@@ -392,11 +411,13 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
     # then fit/predict for each method using the same arrays.
     by_condition_rows: list[dict[str, Any]] = []
     by_condition_rows_in: list[dict[str, Any]] = []
-    method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
-    method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
-    method_to_y_true_all_in: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
-    method_to_y_pred_all_in: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
+    handfeat_mode = str(args.handfeat_mode)
     need_hand = any(str(m).startswith("handfeat") for m in args.methods)
+    run_methods = [_method_run_name(str(m), handfeat_mode) for m in args.methods]
+    method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in run_methods}
+    method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in run_methods}
+    method_to_y_true_all_in: dict[str, list[np.ndarray]] = {m: [] for m in run_methods}
+    method_to_y_pred_all_in: dict[str, list[np.ndarray]] = {m: [] for m in run_methods}
 
     cache_dir = os.path.join(repeat_dir, "cache_npz") if bool(args.cache_condition_npz) else ""
     if cache_dir:
@@ -517,6 +538,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
             cache_key = (
                 f"snr{float(snr_db):g}_L{int(L)}_seed{int(seed)}_hand{int(need_hand)}_"
+                f"handmode{args.handfeat_mode}_"
                 f"trm{args.train_occlude_mode}_trbp{args.train_border_prob}_trbf{args.train_border_fill}_"
                 f"tem{args.test_occlude_mode}_tebp{args.test_border_prob}_tebf{args.test_border_fill}_"
                 f"trss{args.train_border_sat_strength}_tess{args.test_border_sat_strength}"
@@ -539,9 +561,9 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 Xte_flat, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
                 Xte_in_flat, yte_in = _to_numpy_xy(ds_test_in, batch_size=args.batch_size, num_workers=args.num_workers)
                 if need_hand:
-                    Xtr_hand, _ = _to_numpy_handfeat_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
-                    Xte_hand, _ = _to_numpy_handfeat_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
-                    Xte_in_hand, _ = _to_numpy_handfeat_xy(ds_test_in, batch_size=args.batch_size, num_workers=args.num_workers)
+                    Xtr_hand, _ = _to_numpy_handfeat_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers, mode=args.handfeat_mode)
+                    Xte_hand, _ = _to_numpy_handfeat_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers, mode=args.handfeat_mode)
+                    Xte_in_hand, _ = _to_numpy_handfeat_xy(ds_test_in, batch_size=args.batch_size, num_workers=args.num_workers, mode=args.handfeat_mode)
                 if cache_path:
                     payload: dict[str, Any] = {
                         "Xtr_flat": Xtr_flat,
@@ -562,7 +584,9 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 )
 
             for method in args.methods:
-                if str(method).startswith("handfeat"):
+                method = str(method)
+                run_method = _method_run_name(method, handfeat_mode)
+                if method.startswith("handfeat"):
                     Xtr = Xtr_hand
                     Xte = Xte_hand
                     Xte_in = Xte_in_hand
@@ -581,7 +605,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
                 by_condition_rows.append(
                     {
-                        "method": method,
+                        "method": run_method,
                         "snr_db": float(snr_db),
                         "L": int(L),
                         "accuracy": float(m.accuracy),
@@ -590,7 +614,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 )
                 by_condition_rows_in.append(
                     {
-                        "method": method,
+                        "method": run_method,
                         "snr_db": float(snr_db),
                         "L": int(L),
                         "accuracy": float(m_in.accuracy),
@@ -599,7 +623,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 )
 
                 if not args.no_plots and not args.no_per_condition_plots:
-                    tag = f"{_sanitize_tag(method)}_snr{float(snr_db):g}_L{int(L)}"
+                    tag = f"{_sanitize_tag(run_method)}_snr{float(snr_db):g}_L{int(L)}"
                     save_confusion_matrix_png(
                         cm,
                         CLASS_NAMES,
@@ -615,13 +639,13 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                         title=f"{method} | row-norm | SNR={float(snr_db):g}dB L={int(L)}",
                     )
 
-                method_to_y_true_all[method].append(yte.astype(np.int64, copy=False))
-                method_to_y_pred_all[method].append(y_pred)
-                method_to_y_true_all_in[method].append(yte_in.astype(np.int64, copy=False))
-                method_to_y_pred_all_in[method].append(y_pred_in)
+                method_to_y_true_all[run_method].append(yte.astype(np.int64, copy=False))
+                method_to_y_pred_all[run_method].append(y_pred)
+                method_to_y_true_all_in[run_method].append(yte_in.astype(np.int64, copy=False))
+                method_to_y_pred_all_in[run_method].append(y_pred_in)
 
     aggregates: list[RepeatAggregate] = []
-    for method in args.methods:
+    for method in run_methods:
         y_true_all_np = np.concatenate(method_to_y_true_all[method], axis=0)
         y_pred_all_np = np.concatenate(method_to_y_pred_all[method], axis=0)
         m_all = compute_metrics(y_true_all_np, y_pred_all_np)
@@ -686,7 +710,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                     ).macro_f1
                 ),
             }
-            for method in args.methods
+            for method in run_methods
         ],
     )
 
@@ -808,6 +832,13 @@ def build_argparser() -> argparse.ArgumentParser:
             "handfeat_svm_linear",
             "handfeat_svm_rbf",
         ],
+    )
+    p.add_argument(
+        "--handfeat_mode",
+        type=str,
+        default="full",
+        choices=["full", "peaks_only", "stats_only"],
+        help="Only affects handfeat_* methods. full keeps backward-compatible feature vector.",
     )
     p.add_argument(
         "--max_methods",
