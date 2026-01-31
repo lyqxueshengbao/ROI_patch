@@ -11,7 +11,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from datasets.roi_patch_dataset import ToyROIPatchDataset, make_fixed_condition_dataset
+from datasets.roi_patch_dataset import ToyROIPatchDataset, apply_border_overrides, make_cfg, make_fixed_condition_dataset
+from datasets.toy_generator import ToyGenConfig
 from models.baseline_cnn import BaselineCNN
 from models.hf_gated_fusion import HFGatedFusionNet
 from utils.checkpoint import save_checkpoint
@@ -30,6 +31,85 @@ def _build_model(name: str, num_classes: int) -> nn.Module:
     if name == "hf_gated":
         return HFGatedFusionNet(num_classes=num_classes)
     raise ValueError(f"Unknown model: {name}")
+
+
+def _preview_cfg(
+    args: argparse.Namespace,
+    *,
+    profile: str,
+    roi_mode: str,
+    occlude_mode: str | None,
+    border_prob: float | None,
+    border_sides: str | None,
+    border_min: int | None,
+    border_max: int | None,
+    border_fill: str | None,
+    border_sat_q: float | None,
+    border_sat_strength: float | None,
+    border_sat_noise: float | None,
+    border_sat_clip: bool | None,
+) -> ToyGenConfig:
+    snr0 = float(args.snr_list[0]) if len(args.snr_list) else float(args.snr_list)
+    L0 = int(args.L_list[0]) if len(args.L_list) else int(args.L_list)
+    if profile:
+        cfg = make_cfg(
+            profile=profile,  # type: ignore[arg-type]
+            roi_mode=roi_mode,  # type: ignore[arg-type]
+            snr_db=snr0,
+            L=L0,
+            hf_mode=args.hf_mode,
+            normalize=args.normalize,
+            enable_aug=True,
+            height=args.patch_size,
+            width=args.patch_size,
+            center_sigma_oracle=args.center_sigma_oracle,
+            center_sigma_min=args.center_sigma_min,
+            center_sigma_max=args.center_sigma_max,
+            pseudo_peak_max=args.pseudo_peak_max,
+        )
+    else:
+        cfg = ToyGenConfig(
+            height=args.patch_size,
+            width=args.patch_size,
+            snr_db=snr0,
+            L=L0,
+            hf_mode=args.hf_mode,
+            normalize=args.normalize,
+            roi_mode=roi_mode,  # type: ignore[arg-type]
+            center_sigma_oracle=args.center_sigma_oracle,
+            center_sigma_min=args.center_sigma_min,
+            center_sigma_max=args.center_sigma_max,
+            pseudo_peak_prob=args.pseudo_peak_prob,
+            pseudo_peak_max=args.pseudo_peak_max,
+            warp_prob=args.warp_prob,
+            warp_strength=args.warp_strength,
+            corr_noise_prob=args.corr_noise_prob,
+            corr_strength=args.corr_strength,
+            enable_aug=True,
+        )
+
+    return apply_border_overrides(
+        cfg,
+        occlude_mode=occlude_mode,  # type: ignore[arg-type]
+        border_prob=border_prob,
+        border_sides=border_sides,  # type: ignore[arg-type]
+        border_min=border_min,
+        border_max=border_max,
+        border_fill=border_fill,  # type: ignore[arg-type]
+        border_sat_q=border_sat_q,
+        border_sat_strength=border_sat_strength,
+        border_sat_noise=border_sat_noise,
+        border_sat_clip=border_sat_clip,
+    )
+
+
+def _print_border_cfg(tag: str, cfg: ToyGenConfig) -> None:
+    print(
+        f"[{tag}] occlude_mode={cfg.occlude_mode} border_prob={cfg.border_prob:g} "
+        f"border_min={cfg.border_min} border_max={cfg.border_max} border_sides={cfg.border_sides} "
+        f"border_fill={cfg.border_fill} sat_strength={cfg.border_sat_strength:g} sat_q={cfg.border_sat_q:g} "
+        f"sat_noise={cfg.border_sat_noise:g} sat_clip={int(bool(cfg.border_sat_clip))}"
+    )
 
 
 @torch.no_grad()
@@ -86,6 +166,39 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         train_profile = ""
         test_profile = ""
 
+    cfg_train_preview = _preview_cfg(
+        args,
+        profile=train_profile,
+        roi_mode=train_roi_mode,
+        occlude_mode=args.train_occlude_mode,
+        border_prob=args.train_border_prob,
+        border_sides=args.train_border_sides,
+        border_min=args.train_border_min,
+        border_max=args.train_border_max,
+        border_fill=args.train_border_fill,
+        border_sat_q=args.train_border_sat_q,
+        border_sat_strength=args.train_border_sat_strength,
+        border_sat_noise=args.train_border_sat_noise,
+        border_sat_clip=args.train_border_sat_clip,
+    )
+    cfg_test_preview = _preview_cfg(
+        args,
+        profile=test_profile,
+        roi_mode=test_roi_mode,
+        occlude_mode=args.test_occlude_mode,
+        border_prob=args.test_border_prob,
+        border_sides=args.test_border_sides,
+        border_min=args.test_border_min,
+        border_max=args.test_border_max,
+        border_fill=args.test_border_fill,
+        border_sat_q=args.test_border_sat_q,
+        border_sat_strength=args.test_border_sat_strength,
+        border_sat_noise=args.test_border_sat_noise,
+        border_sat_clip=args.test_border_sat_clip,
+    )
+    _print_border_cfg(f"repeat {repeat_idx:02d} train_cfg", cfg_train_preview)
+    _print_border_cfg(f"repeat {repeat_idx:02d} test_cfg ", cfg_test_preview)
+
     with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -126,6 +239,18 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         height=args.patch_size,
         width=args.patch_size,
     )
+    ds_train.set_border_overrides(
+        occlude_mode=args.train_occlude_mode,  # type: ignore[arg-type]
+        border_prob=args.train_border_prob,
+        border_sides=args.train_border_sides,  # type: ignore[arg-type]
+        border_min=args.train_border_min,
+        border_max=args.train_border_max,
+        border_fill=args.train_border_fill,  # type: ignore[arg-type]
+        border_sat_q=args.train_border_sat_q,
+        border_sat_strength=args.train_border_sat_strength,
+        border_sat_noise=args.train_border_sat_noise,
+        border_sat_clip=args.train_border_sat_clip,
+    )
     ds_val = ToyROIPatchDataset(
         split="val",
         total_samples=args.total_samples,
@@ -150,6 +275,18 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         height=args.patch_size,
         width=args.patch_size,
     )
+    ds_val.set_border_overrides(
+        occlude_mode=args.test_occlude_mode,  # type: ignore[arg-type]
+        border_prob=args.test_border_prob,
+        border_sides=args.test_border_sides,  # type: ignore[arg-type]
+        border_min=args.test_border_min,
+        border_max=args.test_border_max,
+        border_fill=args.test_border_fill,  # type: ignore[arg-type]
+        border_sat_q=args.test_border_sat_q,
+        border_sat_strength=args.test_border_sat_strength,
+        border_sat_noise=args.test_border_sat_noise,
+        border_sat_clip=args.test_border_sat_clip,
+    )
     ds_test = ToyROIPatchDataset(
         split="test",
         total_samples=args.total_samples,
@@ -173,6 +310,18 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         enable_aug=False,
         height=args.patch_size,
         width=args.patch_size,
+    )
+    ds_test.set_border_overrides(
+        occlude_mode=args.test_occlude_mode,  # type: ignore[arg-type]
+        border_prob=args.test_border_prob,
+        border_sides=args.test_border_sides,  # type: ignore[arg-type]
+        border_min=args.test_border_min,
+        border_max=args.test_border_max,
+        border_fill=args.test_border_fill,  # type: ignore[arg-type]
+        border_sat_q=args.test_border_sat_q,
+        border_sat_strength=args.test_border_sat_strength,
+        border_sat_noise=args.test_border_sat_noise,
+        border_sat_clip=args.test_border_sat_clip,
     )
 
     train_loader = DataLoader(
@@ -320,6 +469,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 warp_strength=args.warp_strength,
                 corr_noise_prob=args.corr_noise_prob,
                 corr_strength=args.corr_strength,
+                occlude_mode_override=args.test_occlude_mode,  # type: ignore[arg-type]
+                border_prob_override=args.test_border_prob,
+                border_sides_override=args.test_border_sides,  # type: ignore[arg-type]
+                border_min_override=args.test_border_min,
+                border_max_override=args.test_border_max,
+                border_fill_override=args.test_border_fill,  # type: ignore[arg-type]
+                border_sat_q_override=args.test_border_sat_q,
+                border_sat_strength_override=args.test_border_sat_strength,
+                border_sat_noise_override=args.test_border_sat_noise,
+                border_sat_clip_override=args.test_border_sat_clip,
             )
             ds_cond_in = make_fixed_condition_dataset(
                 split="test",
@@ -344,6 +503,16 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 warp_strength=args.warp_strength,
                 corr_noise_prob=args.corr_noise_prob,
                 corr_strength=args.corr_strength,
+                occlude_mode_override=args.train_occlude_mode,  # type: ignore[arg-type]
+                border_prob_override=args.train_border_prob,
+                border_sides_override=args.train_border_sides,  # type: ignore[arg-type]
+                border_min_override=args.train_border_min,
+                border_max_override=args.train_border_max,
+                border_fill_override=args.train_border_fill,  # type: ignore[arg-type]
+                border_sat_q_override=args.train_border_sat_q,
+                border_sat_strength_override=args.train_border_sat_strength,
+                border_sat_noise_override=args.train_border_sat_noise,
+                border_sat_clip_override=args.train_border_sat_clip,
             )
             loader_cond = DataLoader(
                 ds_cond,
@@ -498,6 +667,45 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--test_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
     p.add_argument("--train_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
     p.add_argument("--test_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
+
+    # Border-jam / occlusion overrides (when provided, override profile(make_cfg) defaults).
+    p.add_argument("--train_occlude_mode", type=str, default=None, choices=["none", "block", "border"])
+    p.add_argument("--train_border_prob", type=float, default=None)
+    p.add_argument("--train_border_sides", type=str, default=None, choices=["one", "two", "rand12"])
+    p.add_argument("--train_border_min", type=int, default=None)
+    p.add_argument("--train_border_max", type=int, default=None)
+    p.add_argument(
+        "--train_border_fill",
+        type=str,
+        default=None,
+        choices=["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"],
+    )
+    p.add_argument("--train_border_sat_q", type=float, default=None)
+    p.add_argument("--train_border_sat_strength", type=float, default=None)
+    p.add_argument("--train_border_sat_noise", type=float, default=None)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--train_border_sat_clip", dest="train_border_sat_clip", action="store_true")
+    g.add_argument("--train_no_border_sat_clip", dest="train_border_sat_clip", action="store_false")
+    p.set_defaults(train_border_sat_clip=None)
+
+    p.add_argument("--test_occlude_mode", type=str, default=None, choices=["none", "block", "border"])
+    p.add_argument("--test_border_prob", type=float, default=None)
+    p.add_argument("--test_border_sides", type=str, default=None, choices=["one", "two", "rand12"])
+    p.add_argument("--test_border_min", type=int, default=None)
+    p.add_argument("--test_border_max", type=int, default=None)
+    p.add_argument(
+        "--test_border_fill",
+        type=str,
+        default=None,
+        choices=["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"],
+    )
+    p.add_argument("--test_border_sat_q", type=float, default=None)
+    p.add_argument("--test_border_sat_strength", type=float, default=None)
+    p.add_argument("--test_border_sat_noise", type=float, default=None)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--test_border_sat_clip", dest="test_border_sat_clip", action="store_true")
+    g.add_argument("--test_no_border_sat_clip", dest="test_border_sat_clip", action="store_false")
+    p.set_defaults(test_border_sat_clip=None)
     p.add_argument("--center_sigma_oracle", type=float, default=1.0)
     p.add_argument("--center_sigma_min", type=float, default=1.5)
     p.add_argument("--center_sigma_max", type=float, default=6.0)

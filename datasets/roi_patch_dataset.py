@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Literal, Sequence
 
 import numpy as np
@@ -118,6 +118,44 @@ def make_cfg(
     )
 
 
+def apply_border_overrides(
+    cfg: ToyGenConfig,
+    *,
+    occlude_mode: Literal["none", "block", "border"] | None = None,
+    border_prob: float | None = None,
+    border_sides: Literal["one", "two", "rand12"] | None = None,
+    border_min: int | None = None,
+    border_max: int | None = None,
+    border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] | None = None,
+    border_sat_q: float | None = None,
+    border_sat_strength: float | None = None,
+    border_sat_noise: float | None = None,
+    border_sat_clip: bool | None = None,
+) -> ToyGenConfig:
+    updates: dict = {}
+    if occlude_mode is not None:
+        updates["occlude_mode"] = occlude_mode
+    if border_prob is not None:
+        updates["border_prob"] = float(border_prob)
+    if border_sides is not None:
+        updates["border_sides"] = border_sides
+    if border_min is not None:
+        updates["border_min"] = int(border_min)
+    if border_max is not None:
+        updates["border_max"] = int(border_max)
+    if border_fill is not None:
+        updates["border_fill"] = border_fill
+    if border_sat_q is not None:
+        updates["border_sat_q"] = float(border_sat_q)
+    if border_sat_strength is not None:
+        updates["border_sat_strength"] = float(border_sat_strength)
+    if border_sat_noise is not None:
+        updates["border_sat_noise"] = float(border_sat_noise)
+    if border_sat_clip is not None:
+        updates["border_sat_clip"] = bool(border_sat_clip)
+    return replace(cfg, **updates) if updates else cfg
+
+
 class ToyROIPatchDataset(Dataset):
     def __init__(
         self,
@@ -202,6 +240,18 @@ class ToyROIPatchDataset(Dataset):
         self.height = int(height)
         self.width = int(width)
         self._epoch = 0
+
+        # Optional per-dataset overrides (used to override profile(make_cfg) defaults when CLI provides values).
+        self._override_occlude_mode: Literal["none", "block", "border"] | None = None
+        self._override_border_prob: float | None = None
+        self._override_border_sides: Literal["one", "two", "rand12"] | None = None
+        self._override_border_min: int | None = None
+        self._override_border_max: int | None = None
+        self._override_border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] | None = None
+        self._override_border_sat_q: float | None = None
+        self._override_border_sat_strength: float | None = None
+        self._override_border_sat_noise: float | None = None
+        self._override_border_sat_clip: bool | None = None
 
         if self.total_samples <= 0:
             raise ValueError("total_samples must be > 0")
@@ -291,9 +341,48 @@ class ToyROIPatchDataset(Dataset):
                 occlude_fill=self.occlude_fill,
                 enable_aug=self.enable_aug and (self.split == "train"),
             )
+
+        cfg = apply_border_overrides(
+            cfg,
+            occlude_mode=self._override_occlude_mode,
+            border_prob=self._override_border_prob,
+            border_sides=self._override_border_sides,
+            border_min=self._override_border_min,
+            border_max=self._override_border_max,
+            border_fill=self._override_border_fill,
+            border_sat_q=self._override_border_sat_q,
+            border_sat_strength=self._override_border_sat_strength,
+            border_sat_noise=self._override_border_sat_noise,
+            border_sat_clip=self._override_border_sat_clip,
+        )
         x_np, y = generate_sample(label, cfg, rng)
         x = torch.from_numpy(x_np)
         return x, int(y)
+
+    def set_border_overrides(
+        self,
+        *,
+        occlude_mode: Literal["none", "block", "border"] | None = None,
+        border_prob: float | None = None,
+        border_sides: Literal["one", "two", "rand12"] | None = None,
+        border_min: int | None = None,
+        border_max: int | None = None,
+        border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] | None = None,
+        border_sat_q: float | None = None,
+        border_sat_strength: float | None = None,
+        border_sat_noise: float | None = None,
+        border_sat_clip: bool | None = None,
+    ) -> None:
+        self._override_occlude_mode = occlude_mode
+        self._override_border_prob = float(border_prob) if border_prob is not None else None
+        self._override_border_sides = border_sides
+        self._override_border_min = int(border_min) if border_min is not None else None
+        self._override_border_max = int(border_max) if border_max is not None else None
+        self._override_border_fill = border_fill
+        self._override_border_sat_q = float(border_sat_q) if border_sat_q is not None else None
+        self._override_border_sat_strength = float(border_sat_strength) if border_sat_strength is not None else None
+        self._override_border_sat_noise = float(border_sat_noise) if border_sat_noise is not None else None
+        self._override_border_sat_clip = bool(border_sat_clip) if border_sat_clip is not None else None
 
 
 def make_fixed_condition_dataset(
@@ -336,8 +425,18 @@ def make_fixed_condition_dataset(
     occlude_min_size: int = 4,
     occlude_max_size: int = 10,
     occlude_fill: Literal["zero", "mean"] = "mean",
+    occlude_mode_override: Literal["none", "block", "border"] | None = None,
+    border_prob_override: float | None = None,
+    border_sides_override: Literal["one", "two", "rand12"] | None = None,
+    border_min_override: int | None = None,
+    border_max_override: int | None = None,
+    border_fill_override: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] | None = None,
+    border_sat_q_override: float | None = None,
+    border_sat_strength_override: float | None = None,
+    border_sat_noise_override: float | None = None,
+    border_sat_clip_override: bool | None = None,
 ) -> ToyROIPatchDataset:
-    return ToyROIPatchDataset(
+    ds = ToyROIPatchDataset(
         split=split,
         total_samples=total_samples,
         split_ratio=split_ratio,
@@ -377,3 +476,16 @@ def make_fixed_condition_dataset(
         height=height,
         width=width,
     )
+    ds.set_border_overrides(
+        occlude_mode=occlude_mode_override,
+        border_prob=border_prob_override,
+        border_sides=border_sides_override,
+        border_min=border_min_override,
+        border_max=border_max_override,
+        border_fill=border_fill_override,
+        border_sat_q=border_sat_q_override,
+        border_sat_strength=border_sat_strength_override,
+        border_sat_noise=border_sat_noise_override,
+        border_sat_clip=border_sat_clip_override,
+    )
+    return ds
