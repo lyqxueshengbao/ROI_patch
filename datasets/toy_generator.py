@@ -37,6 +37,18 @@ class ToyGenConfig:
     # Stronger intra-class perturbations
     pseudo_peak_prob: float = 0.35
     pseudo_peak_max: int = 2
+
+    # Near-peak pseudo peaks (peak splitting/merging) - targeted perturbation to break top-k peak
+    # geometry features. Default OFF to avoid changing old experiments.
+    near_peak_prob: float = 0.0
+    near_peak_per_true_max: int = 1
+    near_peak_radius_min: float = 0.8
+    near_peak_radius_max: float = 3.0
+    near_peak_amp_min: float = 0.15
+    near_peak_amp_max: float = 0.65
+    near_peak_sigma_scale_min: float = 0.7
+    near_peak_sigma_scale_max: float = 1.6
+    near_peak_mode: Literal["around_each", "around_random_true"] = "around_each"
     warp_prob: float = 0.25
     warp_strength: float = 0.6
     corr_noise_prob: float = 0.25
@@ -167,6 +179,84 @@ def _rotate_flip(points_yx: np.ndarray, height: int, width: int, rng: np.random.
     if do_v:
         p[:, 0] = (h - 1) - p[:, 0]
     return p
+
+
+def _sample_near_peak_pseudo(
+    cfg: ToyGenConfig,
+    rng: np.random.Generator,
+    centers_yx: np.ndarray,
+    amplitudes: np.ndarray,
+    sigmas: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if float(cfg.near_peak_prob) <= 0.0 or rng.random() >= float(cfg.near_peak_prob):
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    n = int(centers_yx.shape[0])
+    if n <= 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    per_max = int(max(int(cfg.near_peak_per_true_max), 0))
+    if per_max <= 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    indices: list[int] = []
+    if cfg.near_peak_mode == "around_each":
+        for i in range(n):
+            ki = int(rng.integers(0, per_max + 1))
+            indices.extend([i] * ki)
+    elif cfg.near_peak_mode == "around_random_true":
+        i = int(rng.integers(0, n))
+        k = int(rng.integers(1, per_max + 1))
+        indices.extend([i] * k)
+    else:
+        raise ValueError(f"Unknown near_peak_mode={cfg.near_peak_mode}")
+
+    if len(indices) == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    h, w = int(cfg.height), int(cfg.width)
+    margin = int(cfg.margin)
+    rmin = float(cfg.near_peak_radius_min)
+    rmax = float(max(float(cfg.near_peak_radius_max), rmin))
+    amin = float(cfg.near_peak_amp_min)
+    amax = float(max(float(cfg.near_peak_amp_max), amin))
+    smin = float(cfg.near_peak_sigma_scale_min)
+    smax = float(max(float(cfg.near_peak_sigma_scale_max), smin))
+
+    out_centers: list[np.ndarray] = []
+    out_amp: list[float] = []
+    out_sig: list[float] = []
+
+    for i in indices:
+        base_center = centers_yx[i].astype(np.float32, copy=False)
+        base_amp = float(amplitudes[i])
+        base_sig = float(sigmas[i])
+
+        ok = False
+        for _ in range(40):
+            r = float(rng.uniform(rmin, rmax))
+            t = float(rng.uniform(0.0, 2.0 * np.pi))
+            dy = float(np.sin(t) * r)
+            dx = float(np.cos(t) * r)
+            cy = float(base_center[0] + dy)
+            cx = float(base_center[1] + dx)
+            if (margin <= cy <= (h - 1 - margin)) and (margin <= cx <= (w - 1 - margin)):
+                out_centers.append(np.array([cy, cx], dtype=np.float32))
+                out_amp.append(base_amp * float(rng.uniform(amin, amax)))
+                out_sig.append(base_sig * float(rng.uniform(smin, smax)))
+                ok = True
+                break
+        if not ok:
+            continue
+
+    if len(out_centers) == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+
+    return (
+        np.stack(out_centers, axis=0).astype(np.float32),
+        np.array(out_amp, dtype=np.float32),
+        np.array(out_sig, dtype=np.float32),
+    )
 
 
 def _make_class_centers(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
@@ -550,6 +640,10 @@ def generate_sample(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> 
     x_signal = _render_gaussian_peaks(cfg.height, cfg.width, centers, amplitudes, sigmas)
     if pseudo_centers.shape[0] > 0:
         x_signal = x_signal + _render_gaussian_peaks(cfg.height, cfg.width, pseudo_centers, pseudo_amp, pseudo_sig)
+
+    near_centers, near_amp, near_sig = _sample_near_peak_pseudo(cfg, rng, centers, amplitudes, sigmas)
+    if near_centers.shape[0] > 0:
+        x_signal = x_signal + _render_gaussian_peaks(cfg.height, cfg.width, near_centers, near_amp, near_sig)
 
     if float(cfg.warp_prob) > 0.0 and rng.random() < float(cfg.warp_prob):
         x_signal = _warp_image(x_signal, rng=rng, strength=float(cfg.warp_strength))

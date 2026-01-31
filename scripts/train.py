@@ -11,7 +11,13 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from datasets.roi_patch_dataset import ToyROIPatchDataset, apply_border_overrides, make_cfg, make_fixed_condition_dataset
+from datasets.roi_patch_dataset import (
+    ToyROIPatchDataset,
+    apply_border_overrides,
+    apply_near_peak_overrides,
+    make_cfg,
+    make_fixed_condition_dataset,
+)
 from datasets.toy_generator import ToyGenConfig
 from models.baseline_cnn import BaselineCNN
 from models.hf_gated_fusion import HFGatedFusionNet
@@ -48,6 +54,15 @@ def _preview_cfg(
     border_sat_strength: float | None,
     border_sat_noise: float | None,
     border_sat_clip: bool | None,
+    near_peak_prob: float | None,
+    near_peak_per_true_max: int | None,
+    near_peak_radius_min: float | None,
+    near_peak_radius_max: float | None,
+    near_peak_amp_min: float | None,
+    near_peak_amp_max: float | None,
+    near_peak_sigma_scale_min: float | None,
+    near_peak_sigma_scale_max: float | None,
+    near_peak_mode: str | None,
 ) -> ToyGenConfig:
     snr0 = float(args.snr_list[0]) if len(args.snr_list) else float(args.snr_list)
     L0 = int(args.L_list[0]) if len(args.L_list) else int(args.L_list)
@@ -88,7 +103,7 @@ def _preview_cfg(
             enable_aug=True,
         )
 
-    return apply_border_overrides(
+    cfg = apply_border_overrides(
         cfg,
         occlude_mode=occlude_mode,  # type: ignore[arg-type]
         border_prob=border_prob,
@@ -101,6 +116,19 @@ def _preview_cfg(
         border_sat_noise=border_sat_noise,
         border_sat_clip=border_sat_clip,
     )
+    cfg = apply_near_peak_overrides(
+        cfg,
+        near_peak_prob=near_peak_prob,
+        near_peak_per_true_max=near_peak_per_true_max,
+        near_peak_radius_min=near_peak_radius_min,
+        near_peak_radius_max=near_peak_radius_max,
+        near_peak_amp_min=near_peak_amp_min,
+        near_peak_amp_max=near_peak_amp_max,
+        near_peak_sigma_scale_min=near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=near_peak_sigma_scale_max,
+        near_peak_mode=near_peak_mode,  # type: ignore[arg-type]
+    )
+    return cfg
 
 
 def _print_border_cfg(tag: str, cfg: ToyGenConfig) -> None:
@@ -108,7 +136,11 @@ def _print_border_cfg(tag: str, cfg: ToyGenConfig) -> None:
         f"[{tag}] occlude_mode={cfg.occlude_mode} border_prob={cfg.border_prob:g} "
         f"border_min={cfg.border_min} border_max={cfg.border_max} border_sides={cfg.border_sides} "
         f"border_fill={cfg.border_fill} sat_strength={cfg.border_sat_strength:g} sat_q={cfg.border_sat_q:g} "
-        f"sat_noise={cfg.border_sat_noise:g} sat_clip={int(bool(cfg.border_sat_clip))}"
+        f"sat_noise={cfg.border_sat_noise:g} sat_clip={int(bool(cfg.border_sat_clip))} | "
+        f"near_peak_prob={cfg.near_peak_prob:g} per_true_max={cfg.near_peak_per_true_max} "
+        f"r=[{cfg.near_peak_radius_min:g},{cfg.near_peak_radius_max:g}] "
+        f"amp=[{cfg.near_peak_amp_min:g},{cfg.near_peak_amp_max:g}] "
+        f"sigma=[{cfg.near_peak_sigma_scale_min:g},{cfg.near_peak_sigma_scale_max:g}] mode={cfg.near_peak_mode}"
     )
 
 
@@ -180,6 +212,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         border_sat_strength=args.train_border_sat_strength,
         border_sat_noise=args.train_border_sat_noise,
         border_sat_clip=args.train_border_sat_clip,
+        near_peak_prob=args.train_near_peak_prob,
+        near_peak_per_true_max=args.train_near_peak_per_true_max,
+        near_peak_radius_min=args.train_near_peak_radius_min,
+        near_peak_radius_max=args.train_near_peak_radius_max,
+        near_peak_amp_min=args.train_near_peak_amp_min,
+        near_peak_amp_max=args.train_near_peak_amp_max,
+        near_peak_sigma_scale_min=args.train_near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=args.train_near_peak_sigma_scale_max,
+        near_peak_mode=args.train_near_peak_mode,
     )
     cfg_test_preview = _preview_cfg(
         args,
@@ -195,6 +236,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         border_sat_strength=args.test_border_sat_strength,
         border_sat_noise=args.test_border_sat_noise,
         border_sat_clip=args.test_border_sat_clip,
+        near_peak_prob=args.test_near_peak_prob,
+        near_peak_per_true_max=args.test_near_peak_per_true_max,
+        near_peak_radius_min=args.test_near_peak_radius_min,
+        near_peak_radius_max=args.test_near_peak_radius_max,
+        near_peak_amp_min=args.test_near_peak_amp_min,
+        near_peak_amp_max=args.test_near_peak_amp_max,
+        near_peak_sigma_scale_min=args.test_near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=args.test_near_peak_sigma_scale_max,
+        near_peak_mode=args.test_near_peak_mode,
     )
     _print_border_cfg(f"repeat {repeat_idx:02d} train_cfg", cfg_train_preview)
     _print_border_cfg(f"repeat {repeat_idx:02d} test_cfg ", cfg_test_preview)
@@ -251,6 +301,17 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         border_sat_noise=args.train_border_sat_noise,
         border_sat_clip=args.train_border_sat_clip,
     )
+    ds_train.set_near_peak_overrides(
+        near_peak_prob=args.train_near_peak_prob,
+        near_peak_per_true_max=args.train_near_peak_per_true_max,
+        near_peak_radius_min=args.train_near_peak_radius_min,
+        near_peak_radius_max=args.train_near_peak_radius_max,
+        near_peak_amp_min=args.train_near_peak_amp_min,
+        near_peak_amp_max=args.train_near_peak_amp_max,
+        near_peak_sigma_scale_min=args.train_near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=args.train_near_peak_sigma_scale_max,
+        near_peak_mode=args.train_near_peak_mode,  # type: ignore[arg-type]
+    )
     ds_val = ToyROIPatchDataset(
         split="val",
         total_samples=args.total_samples,
@@ -287,6 +348,17 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         border_sat_noise=args.test_border_sat_noise,
         border_sat_clip=args.test_border_sat_clip,
     )
+    ds_val.set_near_peak_overrides(
+        near_peak_prob=args.test_near_peak_prob,
+        near_peak_per_true_max=args.test_near_peak_per_true_max,
+        near_peak_radius_min=args.test_near_peak_radius_min,
+        near_peak_radius_max=args.test_near_peak_radius_max,
+        near_peak_amp_min=args.test_near_peak_amp_min,
+        near_peak_amp_max=args.test_near_peak_amp_max,
+        near_peak_sigma_scale_min=args.test_near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=args.test_near_peak_sigma_scale_max,
+        near_peak_mode=args.test_near_peak_mode,  # type: ignore[arg-type]
+    )
     ds_test = ToyROIPatchDataset(
         split="test",
         total_samples=args.total_samples,
@@ -322,6 +394,17 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         border_sat_strength=args.test_border_sat_strength,
         border_sat_noise=args.test_border_sat_noise,
         border_sat_clip=args.test_border_sat_clip,
+    )
+    ds_test.set_near_peak_overrides(
+        near_peak_prob=args.test_near_peak_prob,
+        near_peak_per_true_max=args.test_near_peak_per_true_max,
+        near_peak_radius_min=args.test_near_peak_radius_min,
+        near_peak_radius_max=args.test_near_peak_radius_max,
+        near_peak_amp_min=args.test_near_peak_amp_min,
+        near_peak_amp_max=args.test_near_peak_amp_max,
+        near_peak_sigma_scale_min=args.test_near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=args.test_near_peak_sigma_scale_max,
+        near_peak_mode=args.test_near_peak_mode,  # type: ignore[arg-type]
     )
 
     train_loader = DataLoader(
@@ -479,6 +562,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 border_sat_strength_override=args.test_border_sat_strength,
                 border_sat_noise_override=args.test_border_sat_noise,
                 border_sat_clip_override=args.test_border_sat_clip,
+                near_peak_prob_override=args.test_near_peak_prob,
+                near_peak_per_true_max_override=args.test_near_peak_per_true_max,
+                near_peak_radius_min_override=args.test_near_peak_radius_min,
+                near_peak_radius_max_override=args.test_near_peak_radius_max,
+                near_peak_amp_min_override=args.test_near_peak_amp_min,
+                near_peak_amp_max_override=args.test_near_peak_amp_max,
+                near_peak_sigma_scale_min_override=args.test_near_peak_sigma_scale_min,
+                near_peak_sigma_scale_max_override=args.test_near_peak_sigma_scale_max,
+                near_peak_mode_override=args.test_near_peak_mode,  # type: ignore[arg-type]
             )
             ds_cond_in = make_fixed_condition_dataset(
                 split="test",
@@ -513,6 +605,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 border_sat_strength_override=args.train_border_sat_strength,
                 border_sat_noise_override=args.train_border_sat_noise,
                 border_sat_clip_override=args.train_border_sat_clip,
+                near_peak_prob_override=args.train_near_peak_prob,
+                near_peak_per_true_max_override=args.train_near_peak_per_true_max,
+                near_peak_radius_min_override=args.train_near_peak_radius_min,
+                near_peak_radius_max_override=args.train_near_peak_radius_max,
+                near_peak_amp_min_override=args.train_near_peak_amp_min,
+                near_peak_amp_max_override=args.train_near_peak_amp_max,
+                near_peak_sigma_scale_min_override=args.train_near_peak_sigma_scale_min,
+                near_peak_sigma_scale_max_override=args.train_near_peak_sigma_scale_max,
+                near_peak_mode_override=args.train_near_peak_mode,  # type: ignore[arg-type]
             )
             loader_cond = DataLoader(
                 ds_cond,
@@ -706,6 +807,27 @@ def build_argparser() -> argparse.ArgumentParser:
     g.add_argument("--test_border_sat_clip", dest="test_border_sat_clip", action="store_true")
     g.add_argument("--test_no_border_sat_clip", dest="test_border_sat_clip", action="store_false")
     p.set_defaults(test_border_sat_clip=None)
+
+    # Near-peak pseudo peaks (targeted peak splitting/merging) overrides (default=None => no override).
+    p.add_argument("--train_near_peak_prob", type=float, default=None)
+    p.add_argument("--train_near_peak_per_true_max", type=int, default=None)
+    p.add_argument("--train_near_peak_radius_min", type=float, default=None)
+    p.add_argument("--train_near_peak_radius_max", type=float, default=None)
+    p.add_argument("--train_near_peak_amp_min", type=float, default=None)
+    p.add_argument("--train_near_peak_amp_max", type=float, default=None)
+    p.add_argument("--train_near_peak_sigma_scale_min", type=float, default=None)
+    p.add_argument("--train_near_peak_sigma_scale_max", type=float, default=None)
+    p.add_argument("--train_near_peak_mode", type=str, default=None, choices=["around_each", "around_random_true"])
+
+    p.add_argument("--test_near_peak_prob", type=float, default=None)
+    p.add_argument("--test_near_peak_per_true_max", type=int, default=None)
+    p.add_argument("--test_near_peak_radius_min", type=float, default=None)
+    p.add_argument("--test_near_peak_radius_max", type=float, default=None)
+    p.add_argument("--test_near_peak_amp_min", type=float, default=None)
+    p.add_argument("--test_near_peak_amp_max", type=float, default=None)
+    p.add_argument("--test_near_peak_sigma_scale_min", type=float, default=None)
+    p.add_argument("--test_near_peak_sigma_scale_max", type=float, default=None)
+    p.add_argument("--test_near_peak_mode", type=str, default=None, choices=["around_each", "around_random_true"])
     p.add_argument("--center_sigma_oracle", type=float, default=1.0)
     p.add_argument("--center_sigma_min", type=float, default=1.5)
     p.add_argument("--center_sigma_max", type=float, default=6.0)

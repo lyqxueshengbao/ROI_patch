@@ -156,6 +156,41 @@ def apply_border_overrides(
     return replace(cfg, **updates) if updates else cfg
 
 
+def apply_near_peak_overrides(
+    cfg: ToyGenConfig,
+    *,
+    near_peak_prob: float | None = None,
+    near_peak_per_true_max: int | None = None,
+    near_peak_radius_min: float | None = None,
+    near_peak_radius_max: float | None = None,
+    near_peak_amp_min: float | None = None,
+    near_peak_amp_max: float | None = None,
+    near_peak_sigma_scale_min: float | None = None,
+    near_peak_sigma_scale_max: float | None = None,
+    near_peak_mode: Literal["around_each", "around_random_true"] | None = None,
+) -> ToyGenConfig:
+    updates: dict = {}
+    if near_peak_prob is not None:
+        updates["near_peak_prob"] = float(near_peak_prob)
+    if near_peak_per_true_max is not None:
+        updates["near_peak_per_true_max"] = int(near_peak_per_true_max)
+    if near_peak_radius_min is not None:
+        updates["near_peak_radius_min"] = float(near_peak_radius_min)
+    if near_peak_radius_max is not None:
+        updates["near_peak_radius_max"] = float(near_peak_radius_max)
+    if near_peak_amp_min is not None:
+        updates["near_peak_amp_min"] = float(near_peak_amp_min)
+    if near_peak_amp_max is not None:
+        updates["near_peak_amp_max"] = float(near_peak_amp_max)
+    if near_peak_sigma_scale_min is not None:
+        updates["near_peak_sigma_scale_min"] = float(near_peak_sigma_scale_min)
+    if near_peak_sigma_scale_max is not None:
+        updates["near_peak_sigma_scale_max"] = float(near_peak_sigma_scale_max)
+    if near_peak_mode is not None:
+        updates["near_peak_mode"] = near_peak_mode
+    return replace(cfg, **updates) if updates else cfg
+
+
 class ToyROIPatchDataset(Dataset):
     def __init__(
         self,
@@ -174,6 +209,15 @@ class ToyROIPatchDataset(Dataset):
         center_sigma_max: float = 6.0,
         pseudo_peak_prob: float = 0.35,
         pseudo_peak_max: int = 2,
+        near_peak_prob: float = 0.0,
+        near_peak_per_true_max: int = 1,
+        near_peak_radius_min: float = 0.8,
+        near_peak_radius_max: float = 3.0,
+        near_peak_amp_min: float = 0.15,
+        near_peak_amp_max: float = 0.65,
+        near_peak_sigma_scale_min: float = 0.7,
+        near_peak_sigma_scale_max: float = 1.6,
+        near_peak_mode: Literal["around_each", "around_random_true"] = "around_each",
         warp_prob: float = 0.25,
         warp_strength: float = 0.6,
         corr_noise_prob: float = 0.25,
@@ -215,6 +259,15 @@ class ToyROIPatchDataset(Dataset):
         self.center_sigma_max = float(center_sigma_max)
         self.pseudo_peak_prob = float(pseudo_peak_prob)
         self.pseudo_peak_max = int(pseudo_peak_max)
+        self.near_peak_prob = float(near_peak_prob)
+        self.near_peak_per_true_max = int(near_peak_per_true_max)
+        self.near_peak_radius_min = float(near_peak_radius_min)
+        self.near_peak_radius_max = float(near_peak_radius_max)
+        self.near_peak_amp_min = float(near_peak_amp_min)
+        self.near_peak_amp_max = float(near_peak_amp_max)
+        self.near_peak_sigma_scale_min = float(near_peak_sigma_scale_min)
+        self.near_peak_sigma_scale_max = float(near_peak_sigma_scale_max)
+        self.near_peak_mode = near_peak_mode
         self.warp_prob = float(warp_prob)
         self.warp_strength = float(warp_strength)
         self.corr_noise_prob = float(corr_noise_prob)
@@ -252,6 +305,16 @@ class ToyROIPatchDataset(Dataset):
         self._override_border_sat_strength: float | None = None
         self._override_border_sat_noise: float | None = None
         self._override_border_sat_clip: bool | None = None
+
+        self._override_near_peak_prob: float | None = None
+        self._override_near_peak_per_true_max: int | None = None
+        self._override_near_peak_radius_min: float | None = None
+        self._override_near_peak_radius_max: float | None = None
+        self._override_near_peak_amp_min: float | None = None
+        self._override_near_peak_amp_max: float | None = None
+        self._override_near_peak_sigma_scale_min: float | None = None
+        self._override_near_peak_sigma_scale_max: float | None = None
+        self._override_near_peak_mode: Literal["around_each", "around_random_true"] | None = None
 
         if self.total_samples <= 0:
             raise ValueError("total_samples must be > 0")
@@ -319,6 +382,15 @@ class ToyROIPatchDataset(Dataset):
                 center_sigma_max=self.center_sigma_max,
                 pseudo_peak_prob=self.pseudo_peak_prob,
                 pseudo_peak_max=self.pseudo_peak_max,
+                near_peak_prob=self.near_peak_prob,
+                near_peak_per_true_max=self.near_peak_per_true_max,
+                near_peak_radius_min=self.near_peak_radius_min,
+                near_peak_radius_max=self.near_peak_radius_max,
+                near_peak_amp_min=self.near_peak_amp_min,
+                near_peak_amp_max=self.near_peak_amp_max,
+                near_peak_sigma_scale_min=self.near_peak_sigma_scale_min,
+                near_peak_sigma_scale_max=self.near_peak_sigma_scale_max,
+                near_peak_mode=self.near_peak_mode,
                 warp_prob=self.warp_prob,
                 warp_strength=self.warp_strength,
                 corr_noise_prob=self.corr_noise_prob,
@@ -355,6 +427,18 @@ class ToyROIPatchDataset(Dataset):
             border_sat_noise=self._override_border_sat_noise,
             border_sat_clip=self._override_border_sat_clip,
         )
+        cfg = apply_near_peak_overrides(
+            cfg,
+            near_peak_prob=self._override_near_peak_prob,
+            near_peak_per_true_max=self._override_near_peak_per_true_max,
+            near_peak_radius_min=self._override_near_peak_radius_min,
+            near_peak_radius_max=self._override_near_peak_radius_max,
+            near_peak_amp_min=self._override_near_peak_amp_min,
+            near_peak_amp_max=self._override_near_peak_amp_max,
+            near_peak_sigma_scale_min=self._override_near_peak_sigma_scale_min,
+            near_peak_sigma_scale_max=self._override_near_peak_sigma_scale_max,
+            near_peak_mode=self._override_near_peak_mode,
+        )
         x_np, y = generate_sample(label, cfg, rng)
         x = torch.from_numpy(x_np)
         return x, int(y)
@@ -384,6 +468,33 @@ class ToyROIPatchDataset(Dataset):
         self._override_border_sat_noise = float(border_sat_noise) if border_sat_noise is not None else None
         self._override_border_sat_clip = bool(border_sat_clip) if border_sat_clip is not None else None
 
+    def set_near_peak_overrides(
+        self,
+        *,
+        near_peak_prob: float | None = None,
+        near_peak_per_true_max: int | None = None,
+        near_peak_radius_min: float | None = None,
+        near_peak_radius_max: float | None = None,
+        near_peak_amp_min: float | None = None,
+        near_peak_amp_max: float | None = None,
+        near_peak_sigma_scale_min: float | None = None,
+        near_peak_sigma_scale_max: float | None = None,
+        near_peak_mode: Literal["around_each", "around_random_true"] | None = None,
+    ) -> None:
+        self._override_near_peak_prob = float(near_peak_prob) if near_peak_prob is not None else None
+        self._override_near_peak_per_true_max = int(near_peak_per_true_max) if near_peak_per_true_max is not None else None
+        self._override_near_peak_radius_min = float(near_peak_radius_min) if near_peak_radius_min is not None else None
+        self._override_near_peak_radius_max = float(near_peak_radius_max) if near_peak_radius_max is not None else None
+        self._override_near_peak_amp_min = float(near_peak_amp_min) if near_peak_amp_min is not None else None
+        self._override_near_peak_amp_max = float(near_peak_amp_max) if near_peak_amp_max is not None else None
+        self._override_near_peak_sigma_scale_min = (
+            float(near_peak_sigma_scale_min) if near_peak_sigma_scale_min is not None else None
+        )
+        self._override_near_peak_sigma_scale_max = (
+            float(near_peak_sigma_scale_max) if near_peak_sigma_scale_max is not None else None
+        )
+        self._override_near_peak_mode = near_peak_mode
+
 
 def make_fixed_condition_dataset(
     split: Literal["train", "val", "test"],
@@ -405,6 +516,15 @@ def make_fixed_condition_dataset(
     center_sigma_max: float = 6.0,
     pseudo_peak_prob: float = 0.35,
     pseudo_peak_max: int = 2,
+    near_peak_prob: float = 0.0,
+    near_peak_per_true_max: int = 1,
+    near_peak_radius_min: float = 0.8,
+    near_peak_radius_max: float = 3.0,
+    near_peak_amp_min: float = 0.15,
+    near_peak_amp_max: float = 0.65,
+    near_peak_sigma_scale_min: float = 0.7,
+    near_peak_sigma_scale_max: float = 1.6,
+    near_peak_mode: Literal["around_each", "around_random_true"] = "around_each",
     warp_prob: float = 0.25,
     warp_strength: float = 0.6,
     corr_noise_prob: float = 0.25,
@@ -435,6 +555,15 @@ def make_fixed_condition_dataset(
     border_sat_strength_override: float | None = None,
     border_sat_noise_override: float | None = None,
     border_sat_clip_override: bool | None = None,
+    near_peak_prob_override: float | None = None,
+    near_peak_per_true_max_override: int | None = None,
+    near_peak_radius_min_override: float | None = None,
+    near_peak_radius_max_override: float | None = None,
+    near_peak_amp_min_override: float | None = None,
+    near_peak_amp_max_override: float | None = None,
+    near_peak_sigma_scale_min_override: float | None = None,
+    near_peak_sigma_scale_max_override: float | None = None,
+    near_peak_mode_override: Literal["around_each", "around_random_true"] | None = None,
 ) -> ToyROIPatchDataset:
     ds = ToyROIPatchDataset(
         split=split,
@@ -452,6 +581,15 @@ def make_fixed_condition_dataset(
         center_sigma_max=center_sigma_max,
         pseudo_peak_prob=pseudo_peak_prob,
         pseudo_peak_max=pseudo_peak_max,
+        near_peak_prob=near_peak_prob,
+        near_peak_per_true_max=near_peak_per_true_max,
+        near_peak_radius_min=near_peak_radius_min,
+        near_peak_radius_max=near_peak_radius_max,
+        near_peak_amp_min=near_peak_amp_min,
+        near_peak_amp_max=near_peak_amp_max,
+        near_peak_sigma_scale_min=near_peak_sigma_scale_min,
+        near_peak_sigma_scale_max=near_peak_sigma_scale_max,
+        near_peak_mode=near_peak_mode,
         warp_prob=warp_prob,
         warp_strength=warp_strength,
         corr_noise_prob=corr_noise_prob,
@@ -487,5 +625,16 @@ def make_fixed_condition_dataset(
         border_sat_strength=border_sat_strength_override,
         border_sat_noise=border_sat_noise_override,
         border_sat_clip=border_sat_clip_override,
+    )
+    ds.set_near_peak_overrides(
+        near_peak_prob=near_peak_prob_override,
+        near_peak_per_true_max=near_peak_per_true_max_override,
+        near_peak_radius_min=near_peak_radius_min_override,
+        near_peak_radius_max=near_peak_radius_max_override,
+        near_peak_amp_min=near_peak_amp_min_override,
+        near_peak_amp_max=near_peak_amp_max_override,
+        near_peak_sigma_scale_min=near_peak_sigma_scale_min_override,
+        near_peak_sigma_scale_max=near_peak_sigma_scale_max_override,
+        near_peak_mode=near_peak_mode_override,
     )
     return ds
