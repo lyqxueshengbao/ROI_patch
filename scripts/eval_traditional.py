@@ -146,7 +146,7 @@ def _preview_cfg(
 
 def _print_border_cfg(tag: str, cfg: ToyGenConfig) -> None:
     print(
-        f"[{tag}] occlude_mode={cfg.occlude_mode} border_prob={cfg.border_prob:g} "
+        f"[{tag}] data_source=toy occlude_mode={cfg.occlude_mode} border_prob={cfg.border_prob:g} "
         f"border_min={cfg.border_min} border_max={cfg.border_max} border_sides={cfg.border_sides} "
         f"border_fill={cfg.border_fill} sat_strength={cfg.border_sat_strength:g} sat_q={cfg.border_sat_q:g} "
         f"sat_noise={cfg.border_sat_noise:g} sat_clip={int(bool(cfg.border_sat_clip))} | "
@@ -389,67 +389,82 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
             {
                 "repeat_id": int(repeat_idx),
                 "seed": int(seed),
+                "data_source": str(args.data_source),
                 "train_roi_mode": train_roi_mode,
                 "test_roi_mode": test_roi_mode,
                 "train_profile": train_profile or None,
                 "test_profile": test_profile or None,
                 "methods": list(args.methods),
+                "fdamimo_theta_span_deg": float(args.fdamimo_theta_span_deg),
+                "fdamimo_r_span_m": float(args.fdamimo_r_span_m),
+                "fdamimo_M": int(args.fdamimo_M),
+                "fdamimo_N": int(args.fdamimo_N),
+                "fdamimo_f0": float(args.fdamimo_f0),
+                "fdamimo_delta_f": float(args.fdamimo_delta_f),
             },
             f,
             ensure_ascii=False,
             indent=2,
         )
 
-    cfg_train_preview = _preview_cfg(
-        args,
-        profile=train_profile,
-        roi_mode=train_roi_mode,
-        occlude_mode=args.train_occlude_mode,
-        border_prob=args.train_border_prob,
-        border_sides=args.train_border_sides,
-        border_min=args.train_border_min,
-        border_max=args.train_border_max,
-        border_fill=args.train_border_fill,
-        border_sat_q=args.train_border_sat_q,
-        border_sat_strength=args.train_border_sat_strength,
-        border_sat_noise=args.train_border_sat_noise,
-        border_sat_clip=args.train_border_sat_clip,
-        near_peak_prob=args.train_near_peak_prob,
-        near_peak_per_true_max=args.train_near_peak_per_true_max,
-        near_peak_radius_min=args.train_near_peak_radius_min,
-        near_peak_radius_max=args.train_near_peak_radius_max,
-        near_peak_amp_min=args.train_near_peak_amp_min,
-        near_peak_amp_max=args.train_near_peak_amp_max,
-        near_peak_sigma_scale_min=args.train_near_peak_sigma_scale_min,
-        near_peak_sigma_scale_max=args.train_near_peak_sigma_scale_max,
-        near_peak_mode=args.train_near_peak_mode,
-    )
-    cfg_test_preview = _preview_cfg(
-        args,
-        profile=test_profile,
-        roi_mode=test_roi_mode,
-        occlude_mode=args.test_occlude_mode,
-        border_prob=args.test_border_prob,
-        border_sides=args.test_border_sides,
-        border_min=args.test_border_min,
-        border_max=args.test_border_max,
-        border_fill=args.test_border_fill,
-        border_sat_q=args.test_border_sat_q,
-        border_sat_strength=args.test_border_sat_strength,
-        border_sat_noise=args.test_border_sat_noise,
-        border_sat_clip=args.test_border_sat_clip,
-        near_peak_prob=args.test_near_peak_prob,
-        near_peak_per_true_max=args.test_near_peak_per_true_max,
-        near_peak_radius_min=args.test_near_peak_radius_min,
-        near_peak_radius_max=args.test_near_peak_radius_max,
-        near_peak_amp_min=args.test_near_peak_amp_min,
-        near_peak_amp_max=args.test_near_peak_amp_max,
-        near_peak_sigma_scale_min=args.test_near_peak_sigma_scale_min,
-        near_peak_sigma_scale_max=args.test_near_peak_sigma_scale_max,
-        near_peak_mode=args.test_near_peak_mode,
-    )
-    _print_border_cfg(f"repeat {repeat_idx:02d} train_cfg", cfg_train_preview)
-    _print_border_cfg(f"repeat {repeat_idx:02d} test_cfg ", cfg_test_preview)
+    if str(args.data_source) == "toy":
+        cfg_train_preview = _preview_cfg(
+            args,
+            profile=train_profile,
+            roi_mode=train_roi_mode,
+            occlude_mode=args.train_occlude_mode,
+            border_prob=args.train_border_prob,
+            border_sides=args.train_border_sides,
+            border_min=args.train_border_min,
+            border_max=args.train_border_max,
+            border_fill=args.train_border_fill,
+            border_sat_q=args.train_border_sat_q,
+            border_sat_strength=args.train_border_sat_strength,
+            border_sat_noise=args.train_border_sat_noise,
+            border_sat_clip=args.train_border_sat_clip,
+            near_peak_prob=args.train_near_peak_prob,
+            near_peak_per_true_max=args.train_near_peak_per_true_max,
+            near_peak_radius_min=args.train_near_peak_radius_min,
+            near_peak_radius_max=args.train_near_peak_radius_max,
+            near_peak_amp_min=args.train_near_peak_amp_min,
+            near_peak_amp_max=args.train_near_peak_amp_max,
+            near_peak_sigma_scale_min=args.train_near_peak_sigma_scale_min,
+            near_peak_sigma_scale_max=args.train_near_peak_sigma_scale_max,
+            near_peak_mode=args.train_near_peak_mode,
+        )
+        cfg_test_preview = _preview_cfg(
+            args,
+            profile=test_profile,
+            roi_mode=test_roi_mode,
+            occlude_mode=args.test_occlude_mode,
+            border_prob=args.test_border_prob,
+            border_sides=args.test_border_sides,
+            border_min=args.test_border_min,
+            border_max=args.test_border_max,
+            border_fill=args.test_border_fill,
+            border_sat_q=args.test_border_sat_q,
+            border_sat_strength=args.test_border_sat_strength,
+            border_sat_noise=args.test_border_sat_noise,
+            border_sat_clip=args.test_border_sat_clip,
+            near_peak_prob=args.test_near_peak_prob,
+            near_peak_per_true_max=args.test_near_peak_per_true_max,
+            near_peak_radius_min=args.test_near_peak_radius_min,
+            near_peak_radius_max=args.test_near_peak_radius_max,
+            near_peak_amp_min=args.test_near_peak_amp_min,
+            near_peak_amp_max=args.test_near_peak_amp_max,
+            near_peak_sigma_scale_min=args.test_near_peak_sigma_scale_min,
+            near_peak_sigma_scale_max=args.test_near_peak_sigma_scale_max,
+            near_peak_mode=args.test_near_peak_mode,
+        )
+        _print_border_cfg(f"repeat {repeat_idx:02d} train_cfg", cfg_train_preview)
+        _print_border_cfg(f"repeat {repeat_idx:02d} test_cfg ", cfg_test_preview)
+    else:
+        print(
+            f"[repeat {repeat_idx:02d}] data_source=fdamimo "
+            f"train_roi_mode={train_roi_mode} test_roi_mode={test_roi_mode} "
+            f"theta_span_deg={float(args.fdamimo_theta_span_deg):g} r_span_m={float(args.fdamimo_r_span_m):g} "
+            f"M={int(args.fdamimo_M)} N={int(args.fdamimo_N)} f0={float(args.fdamimo_f0):g} delta_f={float(args.fdamimo_delta_f):g}"
+        )
 
     # Evaluate per (SNR,L) condition. For speed: generate/flatten features once per condition,
     # then fit/predict for each method using the same arrays.
@@ -485,11 +500,20 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                data_source=str(args.data_source),  # type: ignore[arg-type]
                 roi_mode=train_roi_mode,
                 aug_profile=train_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
+                fdamimo_theta_span_deg=args.fdamimo_theta_span_deg,
+                fdamimo_r_span_m=args.fdamimo_r_span_m,
+                fdamimo_f0=args.fdamimo_f0,
+                fdamimo_M=args.fdamimo_M,
+                fdamimo_N=args.fdamimo_N,
+                fdamimo_delta_f=args.fdamimo_delta_f,
+                fdamimo_d=args.fdamimo_d,
+                fdamimo_c=args.fdamimo_c,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -528,11 +552,20 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                data_source=str(args.data_source),  # type: ignore[arg-type]
                 roi_mode=test_roi_mode,
                 aug_profile=test_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
+                fdamimo_theta_span_deg=args.fdamimo_theta_span_deg,
+                fdamimo_r_span_m=args.fdamimo_r_span_m,
+                fdamimo_f0=args.fdamimo_f0,
+                fdamimo_M=args.fdamimo_M,
+                fdamimo_N=args.fdamimo_N,
+                fdamimo_delta_f=args.fdamimo_delta_f,
+                fdamimo_d=args.fdamimo_d,
+                fdamimo_c=args.fdamimo_c,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -571,11 +604,20 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
+                data_source=str(args.data_source),  # type: ignore[arg-type]
                 roi_mode=train_roi_mode,
                 aug_profile=train_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
+                fdamimo_theta_span_deg=args.fdamimo_theta_span_deg,
+                fdamimo_r_span_m=args.fdamimo_r_span_m,
+                fdamimo_f0=args.fdamimo_f0,
+                fdamimo_M=args.fdamimo_M,
+                fdamimo_N=args.fdamimo_N,
+                fdamimo_delta_f=args.fdamimo_delta_f,
+                fdamimo_d=args.fdamimo_d,
+                fdamimo_c=args.fdamimo_c,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -608,8 +650,9 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
             ds_test_in = _choose_test_subset(ds_test_in_full, cond_test_samples=args.cond_test_samples, seed=cond_seed + 17)
 
             cache_key = (
-                f"snr{float(snr_db):g}_L{int(L)}_seed{int(seed)}_hand{int(need_hand)}_"
+                f"ds{str(args.data_source)}_snr{float(snr_db):g}_L{int(L)}_seed{int(seed)}_hand{int(need_hand)}_"
                 f"handmode{args.handfeat_mode}_"
+                f"fdth{float(args.fdamimo_theta_span_deg):g}_fdr{float(args.fdamimo_r_span_m):g}_fdM{int(args.fdamimo_M)}_fdN{int(args.fdamimo_N)}_"
                 f"trm{args.train_occlude_mode}_trbp{args.train_border_prob}_trbf{args.train_border_fill}_"
                 f"tem{args.test_occlude_mode}_tebp{args.test_border_prob}_tebf{args.test_border_fill}_"
                 f"trss{args.train_border_sat_strength}_tess{args.test_border_sat_strength}_"
@@ -678,6 +721,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
                 by_condition_rows.append(
                     {
+                        "data_source": str(args.data_source),
                         "method": run_method,
                         "snr_db": float(snr_db),
                         "L": int(L),
@@ -687,6 +731,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 )
                 by_condition_rows_in.append(
                     {
+                        "data_source": str(args.data_source),
                         "method": run_method,
                         "snr_db": float(snr_db),
                         "L": int(L),
@@ -751,24 +796,25 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
     _write_csv(
         os.path.join(repeat_dir, "traditional_metrics_by_condition.csv"),
-        ["method", "snr_db", "L", "accuracy", "macro_f1"],
+        ["data_source", "method", "snr_db", "L", "accuracy", "macro_f1"],
         by_condition_rows,
     )
     _write_csv(
         os.path.join(repeat_dir, "traditional_in_domain_metrics_by_condition.csv"),
-        ["method", "snr_db", "L", "accuracy", "macro_f1"],
+        ["data_source", "method", "snr_db", "L", "accuracy", "macro_f1"],
         by_condition_rows_in,
     )
     _write_csv(
         os.path.join(repeat_dir, "traditional_metrics_all_conditions.csv"),
-        ["method", "accuracy", "macro_f1"],
-        [{"method": a.method, "accuracy": a.accuracy, "macro_f1": a.macro_f1} for a in aggregates],
+        ["data_source", "method", "accuracy", "macro_f1"],
+        [{"data_source": str(args.data_source), "method": a.method, "accuracy": a.accuracy, "macro_f1": a.macro_f1} for a in aggregates],
     )
     _write_csv(
         os.path.join(repeat_dir, "traditional_in_domain_metrics_all_conditions.csv"),
-        ["method", "accuracy", "macro_f1"],
+        ["data_source", "method", "accuracy", "macro_f1"],
         [
             {
+                "data_source": str(args.data_source),
                 "method": method,
                 "accuracy": float(
                     compute_metrics(
@@ -824,6 +870,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--L_list", type=int, nargs="+", default=[1])
     p.add_argument("--hf_mode", type=str, default="sobel", choices=["laplacian", "sobel"])
     p.add_argument("--normalize", type=str, default="per_sample", choices=["none", "per_sample"])
+
+    p.add_argument("--data_source", type=str, default="toy", choices=["toy", "fdamimo"])
+    # FDA-MIMO local patch parameters (only used when --data_source=fdamimo).
+    p.add_argument("--fdamimo_theta_span_deg", type=float, default=20.0)
+    p.add_argument("--fdamimo_r_span_m", type=float, default=400.0)
+    p.add_argument("--fdamimo_f0", type=float, default=1e9)
+    p.add_argument("--fdamimo_M", type=int, default=10)
+    p.add_argument("--fdamimo_N", type=int, default=10)
+    p.add_argument("--fdamimo_delta_f", type=float, default=30e3)
+    p.add_argument("--fdamimo_d", type=float, default=0.5)
+    p.add_argument("--fdamimo_c", type=float, default=3e8)
+
     p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
     p.add_argument("--train_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
     p.add_argument("--test_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])

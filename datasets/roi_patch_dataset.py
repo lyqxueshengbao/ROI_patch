@@ -7,10 +7,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from datasets.fdamimo_patch_generator import FdaMimoGenConfig, generate_fdamimo_sample
 from datasets.toy_generator import ToyGenConfig, generate_sample
 
 
 AugProfile = Literal["oracle", "pipeline"]
+DataSource = Literal["toy", "fdamimo"]
 
 
 @dataclass(frozen=True)
@@ -202,11 +204,20 @@ class ToyROIPatchDataset(Dataset):
         L_list: Iterable[int] = (1,),
         hf_mode: Literal["laplacian", "sobel"] = "laplacian",
         normalize: Literal["none", "per_sample"] = "per_sample",
+        data_source: DataSource = "toy",
         roi_mode: Literal["oracle", "pipeline"] = "oracle",
         aug_profile: AugProfile | str = "",
         center_sigma_oracle: float = 1.0,
         center_sigma_min: float = 1.5,
         center_sigma_max: float = 6.0,
+        fdamimo_theta_span_deg: float = 20.0,
+        fdamimo_r_span_m: float = 400.0,
+        fdamimo_f0: float = 1e9,
+        fdamimo_M: int = 10,
+        fdamimo_N: int = 10,
+        fdamimo_delta_f: float = 30e3,
+        fdamimo_d: float = 0.5,
+        fdamimo_c: float = 3e8,
         pseudo_peak_prob: float = 0.35,
         pseudo_peak_max: int = 2,
         near_peak_prob: float = 0.0,
@@ -252,11 +263,20 @@ class ToyROIPatchDataset(Dataset):
         self.L_list = [int(x) for x in L_list]
         self.hf_mode = hf_mode
         self.normalize = normalize
+        self.data_source: DataSource = data_source
         self.roi_mode = roi_mode
         self.aug_profile = str(aug_profile)
         self.center_sigma_oracle = float(center_sigma_oracle)
         self.center_sigma_min = float(center_sigma_min)
         self.center_sigma_max = float(center_sigma_max)
+        self.fdamimo_theta_span_deg = float(fdamimo_theta_span_deg)
+        self.fdamimo_r_span_m = float(fdamimo_r_span_m)
+        self.fdamimo_f0 = float(fdamimo_f0)
+        self.fdamimo_M = int(fdamimo_M)
+        self.fdamimo_N = int(fdamimo_N)
+        self.fdamimo_delta_f = float(fdamimo_delta_f)
+        self.fdamimo_d = float(fdamimo_d)
+        self.fdamimo_c = float(fdamimo_c)
         self.pseudo_peak_prob = float(pseudo_peak_prob)
         self.pseudo_peak_max = int(pseudo_peak_max)
         self.near_peak_prob = float(near_peak_prob)
@@ -352,94 +372,120 @@ class ToyROIPatchDataset(Dataset):
         label = int(rng.integers(0, self.num_classes))
         snr_db = float(rng.choice(self.snr_list))
         L = int(rng.choice(self.L_list))
-        if self.aug_profile:
-            cfg = make_cfg(
-                profile=self.aug_profile,  # type: ignore[arg-type]
-                roi_mode=self.roi_mode,
-                snr_db=snr_db,
-                L=L,
-                hf_mode=self.hf_mode,
-                normalize=self.normalize,
-                enable_aug=self.enable_aug and (self.split == "train"),
-                height=self.height,
-                width=self.width,
-                center_sigma_oracle=self.center_sigma_oracle,
-                center_sigma_min=self.center_sigma_min,
-                center_sigma_max=self.center_sigma_max,
-                pseudo_peak_max=self.pseudo_peak_max,
-            )
-        else:
-            cfg = ToyGenConfig(
-                height=self.height,
-                width=self.width,
-                snr_db=snr_db,
-                L=L,
-                hf_mode=self.hf_mode,
-                normalize=self.normalize,
-                roi_mode=self.roi_mode,
-                center_sigma_oracle=self.center_sigma_oracle,
-                center_sigma_min=self.center_sigma_min,
-                center_sigma_max=self.center_sigma_max,
-                pseudo_peak_prob=self.pseudo_peak_prob,
-                pseudo_peak_max=self.pseudo_peak_max,
-                near_peak_prob=self.near_peak_prob,
-                near_peak_per_true_max=self.near_peak_per_true_max,
-                near_peak_radius_min=self.near_peak_radius_min,
-                near_peak_radius_max=self.near_peak_radius_max,
-                near_peak_amp_min=self.near_peak_amp_min,
-                near_peak_amp_max=self.near_peak_amp_max,
-                near_peak_sigma_scale_min=self.near_peak_sigma_scale_min,
-                near_peak_sigma_scale_max=self.near_peak_sigma_scale_max,
-                near_peak_mode=self.near_peak_mode,
-                warp_prob=self.warp_prob,
-                warp_strength=self.warp_strength,
-                corr_noise_prob=self.corr_noise_prob,
-                corr_strength=self.corr_strength,
-                enable_occlude=self.enable_occlude,
-                occlude_mode=self.occlude_mode,
-                border_prob=self.border_prob,
-                border_sides=self.border_sides,
-                border_min=self.border_min,
-                border_max=self.border_max,
-                border_fill=self.border_fill,
-                border_sat_q=self.border_sat_q,
-                border_sat_strength=self.border_sat_strength,
-                border_sat_noise=self.border_sat_noise,
-                border_sat_clip=self.border_sat_clip,
-                occlude_prob=self.occlude_prob,
-                occlude_max_blocks=self.occlude_max_blocks,
-                occlude_min_size=self.occlude_min_size,
-                occlude_max_size=self.occlude_max_size,
-                occlude_fill=self.occlude_fill,
-                enable_aug=self.enable_aug and (self.split == "train"),
-            )
+        if self.data_source == "toy":
+            if self.aug_profile:
+                cfg = make_cfg(
+                    profile=self.aug_profile,  # type: ignore[arg-type]
+                    roi_mode=self.roi_mode,
+                    snr_db=snr_db,
+                    L=L,
+                    hf_mode=self.hf_mode,
+                    normalize=self.normalize,
+                    enable_aug=self.enable_aug and (self.split == "train"),
+                    height=self.height,
+                    width=self.width,
+                    center_sigma_oracle=self.center_sigma_oracle,
+                    center_sigma_min=self.center_sigma_min,
+                    center_sigma_max=self.center_sigma_max,
+                    pseudo_peak_max=self.pseudo_peak_max,
+                )
+            else:
+                cfg = ToyGenConfig(
+                    height=self.height,
+                    width=self.width,
+                    snr_db=snr_db,
+                    L=L,
+                    hf_mode=self.hf_mode,
+                    normalize=self.normalize,
+                    roi_mode=self.roi_mode,
+                    center_sigma_oracle=self.center_sigma_oracle,
+                    center_sigma_min=self.center_sigma_min,
+                    center_sigma_max=self.center_sigma_max,
+                    pseudo_peak_prob=self.pseudo_peak_prob,
+                    pseudo_peak_max=self.pseudo_peak_max,
+                    near_peak_prob=self.near_peak_prob,
+                    near_peak_per_true_max=self.near_peak_per_true_max,
+                    near_peak_radius_min=self.near_peak_radius_min,
+                    near_peak_radius_max=self.near_peak_radius_max,
+                    near_peak_amp_min=self.near_peak_amp_min,
+                    near_peak_amp_max=self.near_peak_amp_max,
+                    near_peak_sigma_scale_min=self.near_peak_sigma_scale_min,
+                    near_peak_sigma_scale_max=self.near_peak_sigma_scale_max,
+                    near_peak_mode=self.near_peak_mode,
+                    warp_prob=self.warp_prob,
+                    warp_strength=self.warp_strength,
+                    corr_noise_prob=self.corr_noise_prob,
+                    corr_strength=self.corr_strength,
+                    enable_occlude=self.enable_occlude,
+                    occlude_mode=self.occlude_mode,
+                    border_prob=self.border_prob,
+                    border_sides=self.border_sides,
+                    border_min=self.border_min,
+                    border_max=self.border_max,
+                    border_fill=self.border_fill,
+                    border_sat_q=self.border_sat_q,
+                    border_sat_strength=self.border_sat_strength,
+                    border_sat_noise=self.border_sat_noise,
+                    border_sat_clip=self.border_sat_clip,
+                    occlude_prob=self.occlude_prob,
+                    occlude_max_blocks=self.occlude_max_blocks,
+                    occlude_min_size=self.occlude_min_size,
+                    occlude_max_size=self.occlude_max_size,
+                    occlude_fill=self.occlude_fill,
+                    enable_aug=self.enable_aug and (self.split == "train"),
+                )
 
-        cfg = apply_border_overrides(
-            cfg,
-            occlude_mode=self._override_occlude_mode,
-            border_prob=self._override_border_prob,
-            border_sides=self._override_border_sides,
-            border_min=self._override_border_min,
-            border_max=self._override_border_max,
-            border_fill=self._override_border_fill,
-            border_sat_q=self._override_border_sat_q,
-            border_sat_strength=self._override_border_sat_strength,
-            border_sat_noise=self._override_border_sat_noise,
-            border_sat_clip=self._override_border_sat_clip,
-        )
-        cfg = apply_near_peak_overrides(
-            cfg,
-            near_peak_prob=self._override_near_peak_prob,
-            near_peak_per_true_max=self._override_near_peak_per_true_max,
-            near_peak_radius_min=self._override_near_peak_radius_min,
-            near_peak_radius_max=self._override_near_peak_radius_max,
-            near_peak_amp_min=self._override_near_peak_amp_min,
-            near_peak_amp_max=self._override_near_peak_amp_max,
-            near_peak_sigma_scale_min=self._override_near_peak_sigma_scale_min,
-            near_peak_sigma_scale_max=self._override_near_peak_sigma_scale_max,
-            near_peak_mode=self._override_near_peak_mode,
-        )
-        x_np, y = generate_sample(label, cfg, rng)
+            cfg = apply_border_overrides(
+                cfg,
+                occlude_mode=self._override_occlude_mode,
+                border_prob=self._override_border_prob,
+                border_sides=self._override_border_sides,
+                border_min=self._override_border_min,
+                border_max=self._override_border_max,
+                border_fill=self._override_border_fill,
+                border_sat_q=self._override_border_sat_q,
+                border_sat_strength=self._override_border_sat_strength,
+                border_sat_noise=self._override_border_sat_noise,
+                border_sat_clip=self._override_border_sat_clip,
+            )
+            cfg = apply_near_peak_overrides(
+                cfg,
+                near_peak_prob=self._override_near_peak_prob,
+                near_peak_per_true_max=self._override_near_peak_per_true_max,
+                near_peak_radius_min=self._override_near_peak_radius_min,
+                near_peak_radius_max=self._override_near_peak_radius_max,
+                near_peak_amp_min=self._override_near_peak_amp_min,
+                near_peak_amp_max=self._override_near_peak_amp_max,
+                near_peak_sigma_scale_min=self._override_near_peak_sigma_scale_min,
+                near_peak_sigma_scale_max=self._override_near_peak_sigma_scale_max,
+                near_peak_mode=self._override_near_peak_mode,
+            )
+            x_np, y = generate_sample(label, cfg, rng)
+        elif self.data_source == "fdamimo":
+            cfg = FdaMimoGenConfig(
+                patch_h=int(self.height),
+                patch_w=int(self.width),
+                snr_db=float(snr_db),
+                L=int(L),
+                hf_mode=self.hf_mode,
+                normalize=self.normalize,
+                roi_mode=self.roi_mode,
+                center_sigma_oracle=self.center_sigma_oracle,
+                center_sigma_min=self.center_sigma_min,
+                center_sigma_max=self.center_sigma_max,
+                theta_span_deg=float(self.fdamimo_theta_span_deg),
+                r_span_m=float(self.fdamimo_r_span_m),
+                f0=float(self.fdamimo_f0),
+                M=int(self.fdamimo_M),
+                N=int(self.fdamimo_N),
+                delta_f=float(self.fdamimo_delta_f),
+                d=float(self.fdamimo_d),
+                c=float(self.fdamimo_c),
+            )
+            x_np, y = generate_fdamimo_sample(label, cfg, rng)
+        else:
+            raise ValueError(f"Unknown data_source={self.data_source}")
+
         x = torch.from_numpy(x_np)
         return x, int(y)
 
@@ -509,11 +555,20 @@ def make_fixed_condition_dataset(
     height: int,
     width: int,
     *,
+    data_source: DataSource = "toy",
     roi_mode: Literal["oracle", "pipeline"] = "oracle",
     aug_profile: AugProfile | str = "",
     center_sigma_oracle: float = 1.0,
     center_sigma_min: float = 1.5,
     center_sigma_max: float = 6.0,
+    fdamimo_theta_span_deg: float = 20.0,
+    fdamimo_r_span_m: float = 400.0,
+    fdamimo_f0: float = 1e9,
+    fdamimo_M: int = 10,
+    fdamimo_N: int = 10,
+    fdamimo_delta_f: float = 30e3,
+    fdamimo_d: float = 0.5,
+    fdamimo_c: float = 3e8,
     pseudo_peak_prob: float = 0.35,
     pseudo_peak_max: int = 2,
     near_peak_prob: float = 0.0,
@@ -574,11 +629,20 @@ def make_fixed_condition_dataset(
         L_list=(int(L),),
         hf_mode=hf_mode,
         normalize=normalize,
+        data_source=data_source,
         roi_mode=roi_mode,
         aug_profile=aug_profile,
         center_sigma_oracle=center_sigma_oracle,
         center_sigma_min=center_sigma_min,
         center_sigma_max=center_sigma_max,
+        fdamimo_theta_span_deg=fdamimo_theta_span_deg,
+        fdamimo_r_span_m=fdamimo_r_span_m,
+        fdamimo_f0=fdamimo_f0,
+        fdamimo_M=fdamimo_M,
+        fdamimo_N=fdamimo_N,
+        fdamimo_delta_f=fdamimo_delta_f,
+        fdamimo_d=fdamimo_d,
+        fdamimo_c=fdamimo_c,
         pseudo_peak_prob=pseudo_peak_prob,
         pseudo_peak_max=pseudo_peak_max,
         near_peak_prob=near_peak_prob,
