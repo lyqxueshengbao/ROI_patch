@@ -38,11 +38,15 @@ def _profile_params(profile: AugProfile) -> dict:
             "warp_strength": 0.30,
             "corr_strength": 0.30,
             # v2 border-cut (train-time nonzero to improve shifted robustness)
-            "border_prob": 0.15,
-            "border_min": 3,
-            "border_max": 8,
+            "border_prob": 0.20,
+            "border_min": 2,
+            "border_max": 6,
             "border_sides": "one",
-            "border_fill": "zero",
+            "border_fill": "sat_noise",
+            "border_sat_strength": 1.4,
+            "border_sat_q": 0.992,
+            "border_sat_noise": 0.10,
+            "border_sat_clip": True,
         }
     if profile == "pipeline":
         return {
@@ -52,11 +56,15 @@ def _profile_params(profile: AugProfile) -> dict:
             "warp_strength": 0.60,
             "corr_strength": 0.60,
             # v2 border-cut (stronger, mimics pipeline ROI crop/truncation)
-            "border_prob": 0.40,
-            "border_min": 5,
-            "border_max": 14,
+            "border_prob": 0.45,
+            "border_min": 4,
+            "border_max": 12,
             "border_sides": "rand12",
-            "border_fill": "zero",
+            "border_fill": "sat_noise",
+            "border_sat_strength": 2.5,
+            "border_sat_q": 0.995,
+            "border_sat_noise": 0.10,
+            "border_sat_clip": True,
         }
     raise ValueError(f"Unknown profile={profile}")
 
@@ -102,6 +110,10 @@ def make_cfg(
         border_max=int(p["border_max"]),
         border_sides=str(p["border_sides"]),  # type: ignore[arg-type]
         border_fill=str(p["border_fill"]),  # type: ignore[arg-type]
+        border_sat_strength=float(p["border_sat_strength"]),
+        border_sat_q=float(p["border_sat_q"]),
+        border_sat_noise=float(p["border_sat_noise"]),
+        border_sat_clip=bool(p["border_sat_clip"]),
         enable_aug=bool(enable_aug),
     )
 
@@ -134,7 +146,11 @@ class ToyROIPatchDataset(Dataset):
         border_sides: Literal["one", "two", "rand12"] = "rand12",
         border_min: int = 4,
         border_max: int = 14,
-        border_fill: Literal["zero", "min", "mean"] = "zero",
+        border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] = "sat_noise",
+        border_sat_q: float = 0.995,
+        border_sat_strength: float = 2.0,
+        border_sat_noise: float = 0.10,
+        border_sat_clip: bool = True,
         occlude_prob: float = 0.05,
         occlude_max_blocks: int = 1,
         occlude_min_size: int = 4,
@@ -172,6 +188,10 @@ class ToyROIPatchDataset(Dataset):
         self.border_min = int(border_min)
         self.border_max = int(border_max)
         self.border_fill = border_fill
+        self.border_sat_q = float(border_sat_q)
+        self.border_sat_strength = float(border_sat_strength)
+        self.border_sat_noise = float(border_sat_noise)
+        self.border_sat_clip = bool(border_sat_clip)
         self.occlude_prob = float(occlude_prob)
         self.occlude_max_blocks = int(occlude_max_blocks)
         self.occlude_min_size = int(occlude_min_size)
@@ -260,6 +280,10 @@ class ToyROIPatchDataset(Dataset):
                 border_min=self.border_min,
                 border_max=self.border_max,
                 border_fill=self.border_fill,
+                border_sat_q=self.border_sat_q,
+                border_sat_strength=self.border_sat_strength,
+                border_sat_noise=self.border_sat_noise,
+                border_sat_clip=self.border_sat_clip,
                 occlude_prob=self.occlude_prob,
                 occlude_max_blocks=self.occlude_max_blocks,
                 occlude_min_size=self.occlude_min_size,
@@ -302,7 +326,11 @@ def make_fixed_condition_dataset(
     border_sides: Literal["one", "two", "rand12"] = "rand12",
     border_min: int = 4,
     border_max: int = 14,
-    border_fill: Literal["zero", "min", "mean"] = "zero",
+    border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] = "sat_noise",
+    border_sat_q: float = 0.995,
+    border_sat_strength: float = 2.0,
+    border_sat_noise: float = 0.10,
+    border_sat_clip: bool = True,
     occlude_prob: float = 0.05,
     occlude_max_blocks: int = 1,
     occlude_min_size: int = 4,
@@ -336,6 +364,10 @@ def make_fixed_condition_dataset(
         border_min=border_min,
         border_max=border_max,
         border_fill=border_fill,
+        border_sat_q=border_sat_q,
+        border_sat_strength=border_sat_strength,
+        border_sat_noise=border_sat_noise,
+        border_sat_clip=border_sat_clip,
         occlude_prob=occlude_prob,
         occlude_max_blocks=occlude_max_blocks,
         occlude_min_size=occlude_min_size,

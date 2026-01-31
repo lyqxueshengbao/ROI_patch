@@ -56,7 +56,11 @@ class ToyGenConfig:
     border_sides: Literal["one", "two", "rand12"] = "rand12"
     border_min: int = 4
     border_max: int = 14
-    border_fill: Literal["zero", "min", "mean"] = "zero"
+    border_fill: Literal["zero", "mean", "min", "sat_const", "sat_noise", "sat_quantile"] = "sat_noise"
+    border_sat_q: float = 0.995
+    border_sat_strength: float = 2.0
+    border_sat_noise: float = 0.10
+    border_sat_clip: bool = True
 
     # Block cutout (legacy/v1; keep available but default weaker)
     occlude_prob: float = 0.05
@@ -291,9 +295,12 @@ def _sample_roi_offset(cfg: ToyGenConfig, rng: np.random.Generator) -> tuple[flo
     return dy, dx
 
 
-def _apply_border_cut(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
-    # Border truncation (ROI crop error): fill a border band with zeros/mean/min.
-    # Apply on log-pre intensity map to emulate measurement/cropping information loss.
+def _apply_border_band(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
+    # Border-jam band (v2.1):
+    # Fill a border band with strong saturation/interference energy to mimic boundary saturation,
+    # sidelobe spillover, or strong edge interference. This is applied on the log-pre intensity
+    # map to emulate measurement/cropping artifacts, and is designed to disrupt top-k peak /
+    # geometry hand-crafted features while being learnable for CNNs (ignore boundary cue).
     if rng.random() >= float(cfg.border_prob):
         return x.astype(np.float32, copy=False)
 
@@ -304,12 +311,33 @@ def _apply_border_cut(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator
     bw = int(min(bw, min(H, W)))
 
     fill_mode = str(cfg.border_fill)
-    if fill_mode == "mean":
+
+    base = float(np.quantile(x.astype(np.float64, copy=False), float(cfg.border_sat_q)))
+    if base < 1e-6:
+        base = float(x.max())
+    if base < 1e-6:
+        base = 1.0
+
+    if fill_mode == "zero":
+        fill_val = 0.0
+        fill_kind = "scalar"
+    elif fill_mode == "mean":
         fill_val = float(x.mean())
+        fill_kind = "scalar"
     elif fill_mode == "min":
         fill_val = float(x.min())
+        fill_kind = "scalar"
+    elif fill_mode == "sat_const":
+        fill_val = float(base * float(cfg.border_sat_strength))
+        fill_kind = "scalar"
+    elif fill_mode == "sat_quantile":
+        fill_val = float(base * (1.0 + float(cfg.border_sat_strength)))
+        fill_kind = "scalar"
+    elif fill_mode == "sat_noise":
+        fill_val = float(base * float(cfg.border_sat_strength))
+        fill_kind = "noise"
     else:
-        fill_val = 0.0
+        raise ValueError(f"Unknown border_fill={cfg.border_fill}")
 
     sides_mode = str(cfg.border_sides)
     if sides_mode == "rand12":
@@ -317,26 +345,38 @@ def _apply_border_cut(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator
 
     out = x.astype(np.float32, copy=True)
 
+    def fill_region(region: np.ndarray) -> None:
+        if fill_kind == "scalar":
+            region[...] = np.float32(fill_val)
+            return
+        # sat_noise: multiplicative noise inside the band
+        n = rng.normal(0.0, 1.0, size=region.shape).astype(np.float32)
+        v = (np.float32(fill_val) * (1.0 + np.float32(cfg.border_sat_noise) * n)).astype(np.float32)
+        v = np.clip(v, 0.0, None).astype(np.float32)
+        if bool(cfg.border_sat_clip):
+            v = np.minimum(v, np.float32(fill_val) * 3.0).astype(np.float32)
+        region[...] = v
+
     if sides_mode == "one":
         side = str(rng.choice(["top", "bottom", "left", "right"]))
         if side == "top":
-            out[:bw, :] = np.float32(fill_val)
+            fill_region(out[:bw, :])
         elif side == "bottom":
-            out[H - bw :, :] = np.float32(fill_val)
+            fill_region(out[H - bw :, :])
         elif side == "left":
-            out[:, :bw] = np.float32(fill_val)
+            fill_region(out[:, :bw])
         else:
-            out[:, W - bw :] = np.float32(fill_val)
+            fill_region(out[:, W - bw :])
         return out.astype(np.float32, copy=False)
 
     if sides_mode == "two":
         # Two opposite sides: either top+bottom or left+right.
         if bool(rng.integers(0, 2)):
-            out[:bw, :] = np.float32(fill_val)
-            out[H - bw :, :] = np.float32(fill_val)
+            fill_region(out[:bw, :])
+            fill_region(out[H - bw :, :])
         else:
-            out[:, :bw] = np.float32(fill_val)
-            out[:, W - bw :] = np.float32(fill_val)
+            fill_region(out[:, :bw])
+            fill_region(out[:, W - bw :])
         return out.astype(np.float32, copy=False)
 
     raise ValueError(f"Unknown border_sides={cfg.border_sides}")
@@ -376,7 +416,7 @@ def _apply_occlusion(x: np.ndarray, cfg: ToyGenConfig, rng: np.random.Generator)
     if mode == "none":
         return x.astype(np.float32, copy=False)
     if mode == "border":
-        return _apply_border_cut(x, cfg, rng)
+        return _apply_border_band(x, cfg, rng)
     if mode == "block":
         return _apply_block_occlusion(x, cfg, rng)
     raise ValueError(f"Unknown occlude_mode={cfg.occlude_mode}")
