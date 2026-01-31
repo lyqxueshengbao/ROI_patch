@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -239,18 +240,54 @@ class RepeatAggregate:
 
 def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> list[RepeatAggregate]:
     seed_everything(seed)
-    repeat_dir = os.path.join(args.out_dir, f"repeat_{repeat_idx:03d}")
+    use_shift_split = bool(args.train_roi_mode or args.test_roi_mode or args.train_aug_profile or args.test_aug_profile)
+    subdir = f"rep_{repeat_idx:02d}" if use_shift_split else f"repeat_{repeat_idx:03d}"
+    repeat_dir = os.path.join(args.out_dir, subdir)
     os.makedirs(repeat_dir, exist_ok=True)
     with open(os.path.join(repeat_dir, "run_args.txt"), "w", encoding="utf-8") as f:
         for k, v in {**vars(args), "repeat_idx": repeat_idx, "seed": seed}.items():
             f.write(f"{k}: {v}\n")
 
+    if use_shift_split:
+        train_roi_mode = str(args.train_roi_mode or args.roi_mode)
+        test_roi_mode = str(args.test_roi_mode or train_roi_mode)
+        train_profile = str(args.train_aug_profile or "oracle")
+        test_profile = str(args.test_aug_profile or "pipeline")
+    else:
+        train_roi_mode = str(args.roi_mode)
+        test_roi_mode = str(args.roi_mode)
+        train_profile = ""
+        test_profile = ""
+
+    with open(os.path.join(repeat_dir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "repeat_id": int(repeat_idx),
+                "seed": int(seed),
+                "train_roi_mode": train_roi_mode,
+                "test_roi_mode": test_roi_mode,
+                "train_profile": train_profile or None,
+                "test_profile": test_profile or None,
+                "methods": list(args.methods),
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
     # Evaluate per (SNR,L) condition. For speed: generate/flatten features once per condition,
     # then fit/predict for each method using the same arrays.
     by_condition_rows: list[dict[str, Any]] = []
+    by_condition_rows_in: list[dict[str, Any]] = []
     method_to_y_true_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
     method_to_y_pred_all: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
+    method_to_y_true_all_in: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
+    method_to_y_pred_all_in: dict[str, list[np.ndarray]] = {m: [] for m in args.methods}
     need_hand = any(str(m).startswith("handfeat") for m in args.methods)
+
+    cache_dir = os.path.join(repeat_dir, "cache_npz") if bool(args.cache_condition_npz) else ""
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
 
     total_conds = len(args.snr_list) * len(args.L_list)
     cond_idx = 0
@@ -270,7 +307,8 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
-                roi_mode=args.roi_mode,
+                roi_mode=train_roi_mode,
+                aug_profile=train_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
@@ -293,7 +331,32 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
-                roi_mode=args.roi_mode,
+                roi_mode=test_roi_mode,
+                aug_profile=test_profile,
+                center_sigma_oracle=args.center_sigma_oracle,
+                center_sigma_min=args.center_sigma_min,
+                center_sigma_max=args.center_sigma_max,
+                pseudo_peak_prob=args.pseudo_peak_prob,
+                pseudo_peak_max=args.pseudo_peak_max,
+                warp_prob=args.warp_prob,
+                warp_strength=args.warp_strength,
+                corr_noise_prob=args.corr_noise_prob,
+                corr_strength=args.corr_strength,
+            )
+            ds_test_in_full = make_fixed_condition_dataset(
+                split="test",
+                total_samples=args.total_samples,
+                split_ratio=args.split,
+                base_seed=seed,
+                snr_db=float(snr_db),
+                L=int(L),
+                hf_mode=args.hf_mode,
+                normalize=args.normalize,
+                enable_aug=False,
+                height=args.patch_size,
+                width=args.patch_size,
+                roi_mode=train_roi_mode,
+                aug_profile=train_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
@@ -307,12 +370,42 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
             ds_train = _choose_subset(ds_train_full, k=args.cond_train_samples, seed=cond_seed + 7)
             ds_test = _choose_test_subset(ds_test_full, cond_test_samples=args.cond_test_samples, seed=cond_seed + 13)
+            ds_test_in = _choose_test_subset(ds_test_in_full, cond_test_samples=args.cond_test_samples, seed=cond_seed + 17)
 
-            Xtr_flat, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
-            Xte_flat, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
-            if need_hand:
-                Xtr_hand, _ = _to_numpy_handfeat_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
-                Xte_hand, _ = _to_numpy_handfeat_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+            cache_key = f"snr{float(snr_db):g}_L{int(L)}_seed{int(seed)}_hand{int(need_hand)}"
+            cache_path = os.path.join(cache_dir, f"{_sanitize_tag(cache_key)}.npz") if cache_dir else ""
+            if cache_path and os.path.exists(cache_path):
+                z = np.load(cache_path, allow_pickle=False)
+                Xtr_flat = z["Xtr_flat"]
+                ytr = z["ytr"]
+                Xte_flat = z["Xte_flat"]
+                yte = z["yte"]
+                Xte_in_flat = z["Xte_in_flat"]
+                yte_in = z["yte_in"]
+                if need_hand:
+                    Xtr_hand = z["Xtr_hand"]
+                    Xte_hand = z["Xte_hand"]
+                    Xte_in_hand = z["Xte_in_hand"]
+            else:
+                Xtr_flat, ytr = _to_numpy_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
+                Xte_flat, yte = _to_numpy_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+                Xte_in_flat, yte_in = _to_numpy_xy(ds_test_in, batch_size=args.batch_size, num_workers=args.num_workers)
+                if need_hand:
+                    Xtr_hand, _ = _to_numpy_handfeat_xy(ds_train, batch_size=args.batch_size, num_workers=args.num_workers)
+                    Xte_hand, _ = _to_numpy_handfeat_xy(ds_test, batch_size=args.batch_size, num_workers=args.num_workers)
+                    Xte_in_hand, _ = _to_numpy_handfeat_xy(ds_test_in, batch_size=args.batch_size, num_workers=args.num_workers)
+                if cache_path:
+                    payload: dict[str, Any] = {
+                        "Xtr_flat": Xtr_flat,
+                        "ytr": ytr,
+                        "Xte_flat": Xte_flat,
+                        "yte": yte,
+                        "Xte_in_flat": Xte_in_flat,
+                        "yte_in": yte_in,
+                    }
+                    if need_hand:
+                        payload.update({"Xtr_hand": Xtr_hand, "Xte_hand": Xte_hand, "Xte_in_hand": Xte_in_hand})
+                    np.savez_compressed(cache_path, **payload)
 
             if args.verbose:
                 print(
@@ -324,15 +417,19 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 if str(method).startswith("handfeat"):
                     Xtr = Xtr_hand
                     Xte = Xte_hand
+                    Xte_in = Xte_in_hand
                 else:
                     Xtr = Xtr_flat
                     Xte = Xte_flat
+                    Xte_in = Xte_in_flat
                 clf = _build_method(method, seed=seed)
                 clf.fit(Xtr, ytr)
                 y_pred = clf.predict(Xte).astype(np.int64, copy=False)
+                y_pred_in = clf.predict(Xte_in).astype(np.int64, copy=False)
 
                 m = compute_metrics(yte, y_pred)
                 cm = compute_confusion(yte, y_pred, num_classes=args.num_classes)
+                m_in = compute_metrics(yte_in, y_pred_in)
 
                 by_condition_rows.append(
                     {
@@ -341,6 +438,15 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                         "L": int(L),
                         "accuracy": float(m.accuracy),
                         "macro_f1": float(m.macro_f1),
+                    }
+                )
+                by_condition_rows_in.append(
+                    {
+                        "method": method,
+                        "snr_db": float(snr_db),
+                        "L": int(L),
+                        "accuracy": float(m_in.accuracy),
+                        "macro_f1": float(m_in.macro_f1),
                     }
                 )
 
@@ -363,6 +469,8 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
 
                 method_to_y_true_all[method].append(yte.astype(np.int64, copy=False))
                 method_to_y_pred_all[method].append(y_pred)
+                method_to_y_true_all_in[method].append(yte_in.astype(np.int64, copy=False))
+                method_to_y_pred_all_in[method].append(y_pred_in)
 
     aggregates: list[RepeatAggregate] = []
     for method in args.methods:
@@ -391,15 +499,47 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
         aggregates.append(RepeatAggregate(method=method, accuracy=float(m_all.accuracy), macro_f1=float(m_all.macro_f1)))
         print(f"  [all-conditions] {method:10s} acc={float(m_all.accuracy):.4f} macro_f1={float(m_all.macro_f1):.4f}")
 
+        y_true_all_in_np = np.concatenate(method_to_y_true_all_in[method], axis=0)
+        y_pred_all_in_np = np.concatenate(method_to_y_pred_all_in[method], axis=0)
+        m_all_in = compute_metrics(y_true_all_in_np, y_pred_all_in_np)
+        print(f"  [in-domain]     {method:10s} acc={float(m_all_in.accuracy):.4f} macro_f1={float(m_all_in.macro_f1):.4f}")
+
     _write_csv(
         os.path.join(repeat_dir, "traditional_metrics_by_condition.csv"),
         ["method", "snr_db", "L", "accuracy", "macro_f1"],
         by_condition_rows,
     )
     _write_csv(
+        os.path.join(repeat_dir, "traditional_in_domain_metrics_by_condition.csv"),
+        ["method", "snr_db", "L", "accuracy", "macro_f1"],
+        by_condition_rows_in,
+    )
+    _write_csv(
         os.path.join(repeat_dir, "traditional_metrics_all_conditions.csv"),
         ["method", "accuracy", "macro_f1"],
         [{"method": a.method, "accuracy": a.accuracy, "macro_f1": a.macro_f1} for a in aggregates],
+    )
+    _write_csv(
+        os.path.join(repeat_dir, "traditional_in_domain_metrics_all_conditions.csv"),
+        ["method", "accuracy", "macro_f1"],
+        [
+            {
+                "method": method,
+                "accuracy": float(
+                    compute_metrics(
+                        np.concatenate(method_to_y_true_all_in[method], axis=0),
+                        np.concatenate(method_to_y_pred_all_in[method], axis=0),
+                    ).accuracy
+                ),
+                "macro_f1": float(
+                    compute_metrics(
+                        np.concatenate(method_to_y_true_all_in[method], axis=0),
+                        np.concatenate(method_to_y_pred_all_in[method], axis=0),
+                    ).macro_f1
+                ),
+            }
+            for method in args.methods
+        ],
     )
 
     return aggregates
@@ -440,6 +580,10 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--hf_mode", type=str, default="sobel", choices=["laplacian", "sobel"])
     p.add_argument("--normalize", type=str, default="per_sample", choices=["none", "per_sample"])
     p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
+    p.add_argument("--train_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--test_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--train_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--test_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
     p.add_argument("--center_sigma_oracle", type=float, default=1.0)
     p.add_argument("--center_sigma_min", type=float, default=1.5)
     p.add_argument("--center_sigma_max", type=float, default=6.0)
@@ -478,6 +622,12 @@ def build_argparser() -> argparse.ArgumentParser:
             "handfeat_svm_rbf",
         ],
     )
+    p.add_argument(
+        "--max_methods",
+        type=int,
+        default=0,
+        help="If >0, only run the first N methods from --methods (useful for speed).",
+    )
 
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--num_workers", type=int, default=0)
@@ -488,6 +638,11 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only save all-conditions confusion matrices (skip per-(SNR,L) PNGs).",
     )
+    p.add_argument(
+        "--cache_condition_npz",
+        action="store_true",
+        help="Cache per-condition (X_train/y_train/X_test/y_test) arrays to NPZ to avoid regenerating data on re-runs.",
+    )
     p.add_argument("--verbose", action="store_true", help="Print per-condition progress.")
     return p
 
@@ -495,6 +650,8 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argparser().parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    if int(args.max_methods) > 0:
+        args.methods = list(args.methods)[: int(args.max_methods)]
 
     all_repeats: list[list[RepeatAggregate]] = []
     for i in range(int(args.repeat)):

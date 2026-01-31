@@ -17,8 +17,14 @@ class ToyGenConfig:
     normalize: Literal["none", "per_sample"] = "per_sample"
     enable_aug: bool = True
 
-    # ROI center offset model
+    # ROI crop/align error model.
+    #
+    # In "pipeline" mode, the underlying structure is generated around the (oracle-ish) true center,
+    # then a ROI patch is extracted with a center offset caused by detection/localization errors.
+    # This is implemented as a global subpixel shift on the final noisy image `x` (after noise,
+    # before log). The offset scale (sigma) increases as SNR decreases and as L gets smaller.
     roi_mode: Literal["oracle", "pipeline"] = "oracle"
+    enable_roi_shift: bool = True
     center_sigma_oracle: float = 1.0
     center_sigma_min: float = 1.5
     center_sigma_max: float = 6.0
@@ -108,15 +114,6 @@ def _sample_center(cfg: ToyGenConfig, rng: np.random.Generator) -> np.ndarray:
     h, w, m = cfg.height, cfg.width, cfg.margin
     cy0 = (h - 1) * 0.5
     cx0 = (w - 1) * 0.5
-    sigma = _center_sigma(cfg)
-    trunc = float(cfg.center_trunc)
-    for _ in range(200):
-        dy = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
-        dx = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
-        y = cy0 + dy
-        x = cx0 + dx
-        if (m <= y <= (h - 1 - m)) and (m <= x <= (w - 1 - m)):
-            return np.array([y, x], dtype=np.float32)
     y = float(np.clip(cy0, m, h - 1 - m))
     x = float(np.clip(cx0, m, w - 1 - m))
     return np.array([y, x], dtype=np.float32)
@@ -232,9 +229,47 @@ def _mean_filter_3x3(img: np.ndarray) -> np.ndarray:
     return out.astype(np.float32)
 
 
+def _shift_bilinear(img: np.ndarray, dy: float, dx: float) -> np.ndarray:
+    # 2D float32 image, subpixel bilinear sampling with boundary clamp.
+    h, w = img.shape
+    if abs(float(dy)) <= 1e-12 and abs(float(dx)) <= 1e-12:
+        return img.astype(np.float32, copy=False)
+
+    yy, xx = _meshgrid_xy(h, w)
+    yy = np.clip(yy + float(dy), 0.0, h - 1.0)
+    xx = np.clip(xx + float(dx), 0.0, w - 1.0)
+
+    y0 = np.floor(yy).astype(np.int32)
+    x0 = np.floor(xx).astype(np.int32)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    wy = (yy - y0).astype(np.float32)
+    wx = (xx - x0).astype(np.float32)
+
+    Ia = img[y0, x0]
+    Ib = img[y0, x1]
+    Ic = img[y1, x0]
+    Id = img[y1, x1]
+    out = (1 - wy) * ((1 - wx) * Ia + wx * Ib) + wy * ((1 - wx) * Ic + wx * Id)
+    return out.astype(np.float32)
+
+
+def _sample_roi_offset(cfg: ToyGenConfig, rng: np.random.Generator) -> tuple[float, float]:
+    if cfg.roi_mode == "oracle":
+        sigma = float(cfg.center_sigma_oracle)
+    elif cfg.roi_mode == "pipeline":
+        sigma = _center_sigma(cfg)
+    else:
+        raise ValueError(f"Unknown roi_mode={cfg.roi_mode}")
+
+    trunc = float(cfg.center_trunc)
+    dy = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
+    dx = float(np.clip(rng.normal(0.0, sigma), -trunc, trunc))
+    return dy, dx
+
+
 def _warp_image(img: np.ndarray, rng: np.random.Generator, strength: float) -> np.ndarray:
     # Lightweight "mismatch": (a) mild subpixel translation; (b) mild blur/sharpen.
-    h, w = img.shape
     s = float(max(strength, 0.0))
     if s <= 1e-6:
         return img
@@ -242,23 +277,7 @@ def _warp_image(img: np.ndarray, rng: np.random.Generator, strength: float) -> n
     if bool(rng.integers(0, 2)):
         dy = float(rng.normal(0.0, s))
         dx = float(rng.normal(0.0, s))
-        yy, xx = _meshgrid_xy(h, w)
-        yy = np.clip(yy + dy, 0.0, h - 1.0)
-        xx = np.clip(xx + dx, 0.0, w - 1.0)
-
-        y0 = np.floor(yy).astype(np.int32)
-        x0 = np.floor(xx).astype(np.int32)
-        y1 = np.clip(y0 + 1, 0, h - 1)
-        x1 = np.clip(x0 + 1, 0, w - 1)
-        wy = (yy - y0).astype(np.float32)
-        wx = (xx - x0).astype(np.float32)
-
-        Ia = img[y0, x0]
-        Ib = img[y0, x1]
-        Ic = img[y1, x0]
-        Id = img[y1, x1]
-        out = (1 - wy) * ((1 - wx) * Ia + wx * Ib) + wy * ((1 - wx) * Ic + wx * Id)
-        return out.astype(np.float32)
+        return _shift_bilinear(img, dy=dy, dx=dx)
 
     blur = _mean_filter_3x3(img)
     alpha = float(np.clip(s, 0.0, 1.0))
@@ -396,6 +415,12 @@ def generate_sample(label: int, cfg: ToyGenConfig, rng: np.random.Generator) -> 
     else:
         x = _add_noise_snr(x_signal, cfg.snr_db, cfg.L, rng)
     x = np.clip(x, 0.0, None).astype(np.float32)
+
+    if bool(cfg.enable_roi_shift):
+        # Pipeline-ROI crop/align error (detection/localization error propagation).
+        # In "pipeline" mode, the offset scale is SNR/L-dependent via `_center_sigma(cfg)`.
+        dy, dx = _sample_roi_offset(cfg, rng)
+        x = _shift_bilinear(x, dy=dy, dx=dx)
 
     x0 = np.log(x + cfg.eps).astype(np.float32)
     if cfg.hf_mode == "laplacian":

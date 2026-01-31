@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import time
 
@@ -65,12 +66,41 @@ def _run_eval(model: nn.Module, loader: DataLoader, device: torch.device, num_cl
 
 
 def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> dict:
-    run_dir = os.path.join(args.out_dir, f"repeat_{repeat_idx:03d}")
+    use_shift_split = bool(args.train_roi_mode or args.test_roi_mode or args.train_aug_profile or args.test_aug_profile)
+    subdir = f"rep_{repeat_idx:02d}" if use_shift_split else f"repeat_{repeat_idx:03d}"
+    run_dir = os.path.join(args.out_dir, subdir)
     os.makedirs(run_dir, exist_ok=True)
     write_kv(os.path.join(run_dir, "run_args.txt"), {**vars(args), "repeat_idx": repeat_idx, "seed": seed})
 
     seed_everything(seed)
     device = torch.device("cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu")
+
+    if use_shift_split:
+        train_roi_mode = str(args.train_roi_mode or args.roi_mode)
+        test_roi_mode = str(args.test_roi_mode or train_roi_mode)
+        train_profile = str(args.train_aug_profile or "oracle")
+        test_profile = str(args.test_aug_profile or "pipeline")
+    else:
+        train_roi_mode = str(args.roi_mode)
+        test_roi_mode = str(args.roi_mode)
+        train_profile = ""
+        test_profile = ""
+
+    with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "repeat_id": int(repeat_idx),
+                "seed": int(seed),
+                "model": str(args.model),
+                "train_roi_mode": train_roi_mode,
+                "test_roi_mode": test_roi_mode,
+                "train_profile": train_profile or None,
+                "test_profile": test_profile or None,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     ds_train = ToyROIPatchDataset(
         split="train",
@@ -81,7 +111,8 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
-        roi_mode=args.roi_mode,
+        roi_mode=train_roi_mode,
+        aug_profile=train_profile,
         center_sigma_oracle=args.center_sigma_oracle,
         center_sigma_min=args.center_sigma_min,
         center_sigma_max=args.center_sigma_max,
@@ -104,7 +135,8 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
-        roi_mode=args.roi_mode,
+        roi_mode=test_roi_mode,
+        aug_profile=test_profile,
         center_sigma_oracle=args.center_sigma_oracle,
         center_sigma_min=args.center_sigma_min,
         center_sigma_max=args.center_sigma_max,
@@ -127,7 +159,8 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         L_list=args.L_list,
         hf_mode=args.hf_mode,
         normalize=args.normalize,
-        roi_mode=args.roi_mode,
+        roi_mode=test_roi_mode,
+        aug_profile=test_profile,
         center_sigma_oracle=args.center_sigma_oracle,
         center_sigma_min=args.center_sigma_min,
         center_sigma_max=args.center_sigma_max,
@@ -257,8 +290,11 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
 
     # Per-condition test (SNR,L) — avoids reporting only a mixed-distribution score.
     cond_rows: list[dict] = []
+    in_domain_rows: list[dict] = []
     y_true_all: list[np.ndarray] = []
     y_pred_all: list[np.ndarray] = []
+    y_true_all_in: list[np.ndarray] = []
+    y_pred_all_in: list[np.ndarray] = []
     for snr_db in args.snr_list:
         for L in args.L_list:
             ds_cond = make_fixed_condition_dataset(
@@ -273,7 +309,32 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 enable_aug=False,
                 height=args.patch_size,
                 width=args.patch_size,
-                roi_mode=args.roi_mode,
+                roi_mode=test_roi_mode,
+                aug_profile=test_profile,
+                center_sigma_oracle=args.center_sigma_oracle,
+                center_sigma_min=args.center_sigma_min,
+                center_sigma_max=args.center_sigma_max,
+                pseudo_peak_prob=args.pseudo_peak_prob,
+                pseudo_peak_max=args.pseudo_peak_max,
+                warp_prob=args.warp_prob,
+                warp_strength=args.warp_strength,
+                corr_noise_prob=args.corr_noise_prob,
+                corr_strength=args.corr_strength,
+            )
+            ds_cond_in = make_fixed_condition_dataset(
+                split="test",
+                total_samples=args.total_samples,
+                split_ratio=args.split,
+                base_seed=seed,
+                snr_db=float(snr_db),
+                L=int(L),
+                hf_mode=args.hf_mode,
+                normalize=args.normalize,
+                enable_aug=False,
+                height=args.patch_size,
+                width=args.patch_size,
+                roi_mode=train_roi_mode,
+                aug_profile=train_profile,
                 center_sigma_oracle=args.center_sigma_oracle,
                 center_sigma_min=args.center_sigma_min,
                 center_sigma_max=args.center_sigma_max,
@@ -291,7 +352,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 num_workers=args.num_workers,
                 pin_memory=(device.type == "cuda"),
             )
+            loader_cond_in = DataLoader(
+                ds_cond_in,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=(device.type == "cuda"),
+            )
             out = _run_eval(model, loader_cond, device, num_classes=args.num_classes)
+            out_in = _run_eval(model, loader_cond_in, device, num_classes=args.num_classes)
             cond_rows.append(
                 {
                     "snr_db": float(snr_db),
@@ -299,6 +368,15 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                     "loss": float(out["loss"]),
                     "accuracy": float(out["accuracy"]),
                     "macro_f1": float(out["macro_f1"]),
+                }
+            )
+            in_domain_rows.append(
+                {
+                    "snr_db": float(snr_db),
+                    "L": int(L),
+                    "loss": float(out_in["loss"]),
+                    "accuracy": float(out_in["accuracy"]),
+                    "macro_f1": float(out_in["macro_f1"]),
                 }
             )
             save_confusion_matrix_png(
@@ -319,11 +397,19 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
             # accumulate for an "all conditions" aggregate (equal test size per condition)
             y_true_all.append(out["y_true"])
             y_pred_all.append(out["y_pred"])
+            y_true_all_in.append(out_in["y_true"])
+            y_pred_all_in.append(out_in["y_pred"])
 
     with open(os.path.join(run_dir, "test_metrics_by_condition.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["snr_db", "L", "loss", "accuracy", "macro_f1"])
         w.writeheader()
         for r in cond_rows:
+            w.writerow(r)
+
+    with open(os.path.join(run_dir, "in_domain_metrics_by_condition.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["snr_db", "L", "loss", "accuracy", "macro_f1"])
+        w.writeheader()
+        for r in in_domain_rows:
             w.writerow(r)
 
     y_true_all_np = np.concatenate(y_true_all, axis=0)
@@ -344,6 +430,19 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         normalize=True,
         title="Test confusion (row-normalized) | All conditions",
     )
+
+    y_true_all_in_np = np.concatenate(y_true_all_in, axis=0)
+    y_pred_all_in_np = np.concatenate(y_pred_all_in, axis=0)
+    m_all_in = compute_metrics(y_true_all_in_np, y_pred_all_in_np)
+    with open(os.path.join(run_dir, "in_domain_metrics.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["in_domain_accuracy_all_conditions", "in_domain_macro_f1_all_conditions"])
+        w.writeheader()
+        w.writerow(
+            {
+                "in_domain_accuracy_all_conditions": float(m_all_in.accuracy),
+                "in_domain_macro_f1_all_conditions": float(m_all_in.macro_f1),
+            }
+        )
 
     with open(os.path.join(run_dir, "test_metrics.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
@@ -395,6 +494,10 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--no_aug", action="store_true")
 
     p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
+    p.add_argument("--train_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--test_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--train_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
+    p.add_argument("--test_aug_profile", type=str, default="", choices=["", "oracle", "pipeline"])
     p.add_argument("--center_sigma_oracle", type=float, default=1.0)
     p.add_argument("--center_sigma_min", type=float, default=1.5)
     p.add_argument("--center_sigma_max", type=float, default=6.0)
