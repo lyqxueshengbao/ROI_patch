@@ -19,6 +19,8 @@ class FdaMimoGenConfig:
     eps: float = 1e-6
     hf_mode: Literal["laplacian", "sobel"] = "laplacian"
     normalize: Literal["none", "per_sample"] = "per_sample"
+    # Spectrum output mode: "power" = |z|^2 (2-ch), "z_sincos" = |z| + phase as sin/cos (4-ch)
+    spec_mode: Literal["power", "z_sincos"] = "power"
 
     # ROI mode (consistent with toy)
     roi_mode: Literal["oracle", "pipeline"] = "oracle"
@@ -182,6 +184,22 @@ def _response_patch_numpy(
     return P.reshape(H, W).astype(np.float32)
 
 
+def _z_patch_numpy(
+    theta_grid_deg: np.ndarray,  # [W]
+    r_grid_m: np.ndarray,  # [H]
+    y: np.ndarray,  # [MN] complex64
+    cfg: FdaMimoGenConfig,
+) -> np.ndarray:
+    """Compute complex matched-filter output z(theta,r) = a^H y on the local grid."""
+    H = int(r_grid_m.shape[0])
+    W = int(theta_grid_deg.shape[0])
+    thetas = np.repeat(theta_grid_deg.reshape(1, W), H, axis=0).reshape(-1)
+    rs = np.repeat(r_grid_m.reshape(H, 1), W, axis=1).reshape(-1)
+    a = _steering_numpy(thetas, rs, cfg)  # [HW,MN]
+    z = np.sum(np.conj(a) * y.reshape(1, -1), axis=1)  # [HW] complex64
+    return z.reshape(H, W).astype(np.complex64)
+
+
 def generate_fdamimo_sample(
     label: int,
     cfg: FdaMimoGenConfig,
@@ -238,6 +256,29 @@ def generate_fdamimo_sample(
     ).astype(np.complex64)
     y = (y_sig + noise).astype(np.complex64)
 
+    if cfg.spec_mode == "z_sincos":
+        # 4-channel output: [x_mag, x_hf, x_sin, x_cos]
+        z_patch = _z_patch_numpy(theta_grid, r_grid, y, cfg)  # [H,W] complex64
+        z_mag = np.abs(z_patch).astype(np.float32)
+        x_mag = np.log(z_mag + float(cfg.eps)).astype(np.float32)
+        z_angle = np.angle(z_patch).astype(np.float32)
+        x_sin = np.sin(z_angle).astype(np.float32)
+        x_cos = np.cos(z_angle).astype(np.float32)
+        if cfg.hf_mode == "laplacian":
+            x_hf = _laplacian(x_mag)
+        elif cfg.hf_mode == "sobel":
+            x_hf = _sobel_mag(x_mag)
+        else:
+            raise ValueError(f"Unknown hf_mode={cfg.hf_mode}")
+        x_stack = np.stack([x_mag, x_hf, x_sin, x_cos], axis=0).astype(np.float32)
+        if cfg.normalize == "per_sample":
+            # Normalize each channel independently
+            mean = x_stack.mean(axis=(1, 2), keepdims=True).astype(np.float32)
+            std = x_stack.std(axis=(1, 2), keepdims=True).astype(np.float32) + 1e-6
+            x_stack = (x_stack - mean) / std
+        return x_stack.astype(np.float32), int(label)
+
+    # Default: spec_mode == "power" (2-channel output)
     P = _response_patch_numpy(theta_grid, r_grid, y, cfg)  # [H,W] float32, >=0
     x = np.clip(P, 0.0, None).astype(np.float32)
 
@@ -446,7 +487,11 @@ def generate_fdamimo_batch_torch(
     r_grid = r_center[:, None] + r_axis[None, :]  # [B,H] m
 
     # Matched-filter response in HW chunks to reduce peak memory.
-    out = torch.empty((B, H, W), device=device, dtype=torch.float32)
+    use_z_sincos = cfg.spec_mode == "z_sincos"
+    if use_z_sincos:
+        out_z = torch.empty((B, H, W), device=device, dtype=torch.complex64)
+    else:
+        out = torch.empty((B, H, W), device=device, dtype=torch.float32)
     theta_grid_rad = torch.deg2rad(theta_grid)  # [B,W]
     for y0 in range(0, H * W, hw_chunk):
         y1 = min(H * W, y0 + hw_chunk)
@@ -460,9 +505,33 @@ def generate_fdamimo_batch_torch(
         phase_thq = (k0 * x_mn) * torch.sin(th_q[:, :, None])
         a_q = torch.exp(torch.complex(torch.zeros_like(phase_rq), (phase_rq + phase_thq))).to(torch.complex64)
         z = torch.sum(torch.conj(a_q) * y[:, None, :], dim=2)  # [B,chunk]
-        p = (torch.abs(z) ** 2).to(torch.float32) / float(Kch)
-        out.view(B, -1)[:, y0:y1] = p
+        if use_z_sincos:
+            out_z.view(B, -1)[:, y0:y1] = z
+        else:
+            p = (torch.abs(z) ** 2).to(torch.float32) / float(Kch)
+            out.view(B, -1)[:, y0:y1] = p
 
+    if use_z_sincos:
+        # 4-channel output: [x_mag, x_hf, x_sin, x_cos]
+        z_mag = torch.abs(out_z).to(torch.float32)
+        x_mag = torch.log(z_mag + float(cfg.eps))
+        z_angle = torch.angle(out_z)
+        x_sin = torch.sin(z_angle).to(torch.float32)
+        x_cos = torch.cos(z_angle).to(torch.float32)
+        if cfg.hf_mode == "laplacian":
+            x_hf = _torch_laplacian(x_mag)
+        elif cfg.hf_mode == "sobel":
+            x_hf = _torch_sobel_mag(x_mag)
+        else:
+            raise ValueError(f"Unknown hf_mode={cfg.hf_mode}")
+        x_stack = torch.stack([x_mag, x_hf, x_sin, x_cos], dim=1).to(torch.float32)  # [B,4,H,W]
+        if cfg.normalize == "per_sample":
+            mean = x_stack.mean(dim=(2, 3), keepdim=True)
+            std = x_stack.std(dim=(2, 3), keepdim=True) + 1e-6
+            x_stack = (x_stack - mean) / std
+        return x_stack
+
+    # Default: spec_mode == "power" (2-channel output)
     x = torch.clamp(out, min=0.0)
     x0 = torch.log(x + float(cfg.eps))
     if cfg.hf_mode == "laplacian":

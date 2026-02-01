@@ -401,6 +401,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 "fdamimo_N": int(args.fdamimo_N),
                 "fdamimo_f0": float(args.fdamimo_f0),
                 "fdamimo_delta_f": float(args.fdamimo_delta_f),
+                "fdamimo_spec_mode": str(args.fdamimo_spec_mode),
             },
             f,
             ensure_ascii=False,
@@ -514,6 +515,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 fdamimo_delta_f=args.fdamimo_delta_f,
                 fdamimo_d=args.fdamimo_d,
                 fdamimo_c=args.fdamimo_c,
+                fdamimo_spec_mode=args.fdamimo_spec_mode,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -566,6 +568,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 fdamimo_delta_f=args.fdamimo_delta_f,
                 fdamimo_d=args.fdamimo_d,
                 fdamimo_c=args.fdamimo_c,
+                fdamimo_spec_mode=args.fdamimo_spec_mode,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -618,6 +621,7 @@ def _eval_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> li
                 fdamimo_delta_f=args.fdamimo_delta_f,
                 fdamimo_d=args.fdamimo_d,
                 fdamimo_c=args.fdamimo_c,
+                fdamimo_spec_mode=args.fdamimo_spec_mode,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -881,6 +885,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--fdamimo_delta_f", type=float, default=30e3)
     p.add_argument("--fdamimo_d", type=float, default=0.5)
     p.add_argument("--fdamimo_c", type=float, default=3e8)
+    p.add_argument("--fdamimo_spec_mode", type=str, default="power", choices=["power", "z_sincos"],
+                   help="Spectrum mode: 'power' = |z|^2 (2-ch), 'z_sincos' = |z| + phase as sin/cos (4-ch)")
 
     p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
     p.add_argument("--train_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])

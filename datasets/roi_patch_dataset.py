@@ -218,6 +218,7 @@ class ToyROIPatchDataset(Dataset):
         fdamimo_delta_f: float = 30e3,
         fdamimo_d: float = 0.5,
         fdamimo_c: float = 3e8,
+        fdamimo_spec_mode: Literal["power", "z_sincos"] = "power",
         pseudo_peak_prob: float = 0.35,
         pseudo_peak_max: int = 2,
         near_peak_prob: float = 0.0,
@@ -277,6 +278,7 @@ class ToyROIPatchDataset(Dataset):
         self.fdamimo_delta_f = float(fdamimo_delta_f)
         self.fdamimo_d = float(fdamimo_d)
         self.fdamimo_c = float(fdamimo_c)
+        self.fdamimo_spec_mode = fdamimo_spec_mode
         self.pseudo_peak_prob = float(pseudo_peak_prob)
         self.pseudo_peak_max = int(pseudo_peak_max)
         self.near_peak_prob = float(near_peak_prob)
@@ -469,6 +471,7 @@ class ToyROIPatchDataset(Dataset):
                 L=int(L),
                 hf_mode=self.hf_mode,
                 normalize=self.normalize,
+                spec_mode=self.fdamimo_spec_mode,
                 roi_mode=self.roi_mode,
                 center_sigma_oracle=self.center_sigma_oracle,
                 center_sigma_min=self.center_sigma_min,
@@ -569,6 +572,7 @@ def make_fixed_condition_dataset(
     fdamimo_delta_f: float = 30e3,
     fdamimo_d: float = 0.5,
     fdamimo_c: float = 3e8,
+    fdamimo_spec_mode: Literal["power", "z_sincos"] = "power",
     pseudo_peak_prob: float = 0.35,
     pseudo_peak_max: int = 2,
     near_peak_prob: float = 0.0,
@@ -643,6 +647,7 @@ def make_fixed_condition_dataset(
         fdamimo_delta_f=fdamimo_delta_f,
         fdamimo_d=fdamimo_d,
         fdamimo_c=fdamimo_c,
+        fdamimo_spec_mode=fdamimo_spec_mode,
         pseudo_peak_prob=pseudo_peak_prob,
         pseudo_peak_max=pseudo_peak_max,
         near_peak_prob=near_peak_prob,

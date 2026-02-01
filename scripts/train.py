@@ -33,11 +33,11 @@ from utils.seed import seed_everything
 CLASS_NAMES = ["2peaks_close", "2peaks_far", "3peaks_line", "3peaks_cluster"]
 
 
-def _build_model(name: str, num_classes: int) -> nn.Module:
+def _build_model(name: str, num_classes: int, in_channels: int = 2) -> nn.Module:
     if name == "baseline":
-        return BaselineCNN(in_channels=2, num_classes=num_classes)
+        return BaselineCNN(in_channels=in_channels, num_classes=num_classes)
     if name == "hf_gated":
-        return HFGatedFusionNet(num_classes=num_classes)
+        return HFGatedFusionNet(in_channels=in_channels, num_classes=num_classes)
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -156,6 +156,7 @@ def _preview_fdamimo_cfg(args: argparse.Namespace, *, roi_mode: str) -> FdaMimoG
         L=int(L0),
         hf_mode=str(args.hf_mode),  # type: ignore[arg-type]
         normalize=str(args.normalize),  # type: ignore[arg-type]
+        spec_mode=str(args.fdamimo_spec_mode),  # type: ignore[arg-type]
         roi_mode=str(roi_mode),  # type: ignore[arg-type]
         center_sigma_oracle=float(args.center_sigma_oracle),
         center_sigma_min=float(args.center_sigma_min),
@@ -173,7 +174,7 @@ def _preview_fdamimo_cfg(args: argparse.Namespace, *, roi_mode: str) -> FdaMimoG
 
 def _print_fdamimo_cfg(tag: str, cfg: FdaMimoGenConfig) -> None:
     print(
-        f"[{tag}] data_source=fdamimo roi_mode={cfg.roi_mode} "
+        f"[{tag}] data_source=fdamimo roi_mode={cfg.roi_mode} spec_mode={cfg.spec_mode} "
         f"snr_db={cfg.snr_db:g} L={cfg.L} patch={cfg.patch_h}x{cfg.patch_w} "
         f"theta_span_deg={cfg.theta_span_deg:g} r_span_m={cfg.r_span_m:g} "
         f"M={cfg.M} N={cfg.N} f0={cfg.f0:g} delta_f={cfg.delta_f:g} d={cfg.d:g}"
@@ -397,6 +398,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 "fdamimo_N": int(args.fdamimo_N),
                 "fdamimo_f0": float(args.fdamimo_f0),
                 "fdamimo_delta_f": float(args.fdamimo_delta_f),
+                "fdamimo_spec_mode": str(args.fdamimo_spec_mode),
             },
             f,
             ensure_ascii=False,
@@ -426,6 +428,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         fdamimo_delta_f=args.fdamimo_delta_f,
         fdamimo_d=args.fdamimo_d,
         fdamimo_c=args.fdamimo_c,
+        fdamimo_spec_mode=args.fdamimo_spec_mode,
         pseudo_peak_prob=args.pseudo_peak_prob,
         pseudo_peak_max=args.pseudo_peak_max,
         warp_prob=args.warp_prob,
@@ -482,6 +485,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         fdamimo_delta_f=args.fdamimo_delta_f,
         fdamimo_d=args.fdamimo_d,
         fdamimo_c=args.fdamimo_c,
+        fdamimo_spec_mode=args.fdamimo_spec_mode,
         pseudo_peak_prob=args.pseudo_peak_prob,
         pseudo_peak_max=args.pseudo_peak_max,
         warp_prob=args.warp_prob,
@@ -538,6 +542,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         fdamimo_delta_f=args.fdamimo_delta_f,
         fdamimo_d=args.fdamimo_d,
         fdamimo_c=args.fdamimo_c,
+        fdamimo_spec_mode=args.fdamimo_spec_mode,
         pseudo_peak_prob=args.pseudo_peak_prob,
         pseudo_peak_max=args.pseudo_peak_max,
         warp_prob=args.warp_prob,
@@ -600,7 +605,12 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
         pin_memory=(device.type == "cuda"),
     )
 
-    model = _build_model(args.model, num_classes=args.num_classes).to(device)
+    # Detect input channels from dataset sample
+    sample_x, _ = ds_train[0]
+    in_channels = int(sample_x.shape[0])
+    print(f"[repeat {repeat_idx:02d}] Detected in_channels={in_channels}")
+
+    model = _build_model(args.model, num_classes=args.num_classes, in_channels=in_channels).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     crit = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -797,6 +807,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 fdamimo_delta_f=args.fdamimo_delta_f,
                 fdamimo_d=args.fdamimo_d,
                 fdamimo_c=args.fdamimo_c,
+                fdamimo_spec_mode=args.fdamimo_spec_mode,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -849,6 +860,7 @@ def _train_one_repeat(args: argparse.Namespace, repeat_idx: int, seed: int) -> d
                 fdamimo_delta_f=args.fdamimo_delta_f,
                 fdamimo_d=args.fdamimo_d,
                 fdamimo_c=args.fdamimo_c,
+                fdamimo_spec_mode=args.fdamimo_spec_mode,
                 pseudo_peak_prob=args.pseudo_peak_prob,
                 pseudo_peak_max=args.pseudo_peak_max,
                 warp_prob=args.warp_prob,
@@ -1073,6 +1085,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--fdamimo_delta_f", type=float, default=30e3)
     p.add_argument("--fdamimo_d", type=float, default=0.5)
     p.add_argument("--fdamimo_c", type=float, default=3e8)
+    p.add_argument("--fdamimo_spec_mode", type=str, default="power", choices=["power", "z_sincos"],
+                   help="Spectrum mode: 'power' = |z|^2 (2-ch), 'z_sincos' = |z| + phase as sin/cos (4-ch)")
 
     p.add_argument("--roi_mode", type=str, default="oracle", choices=["oracle", "pipeline"])
     p.add_argument("--train_roi_mode", type=str, default="", choices=["", "oracle", "pipeline"])
